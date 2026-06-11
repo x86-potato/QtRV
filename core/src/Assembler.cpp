@@ -15,7 +15,7 @@ Binary Assembler::assemble(const std::vector<IR> &IR_INPUT)
 
             if constexpr (std::is_same_v<T,Instruction>)
             {
-
+                
             }
             if constexpr (std::is_same_v<T, Directive>)
             {

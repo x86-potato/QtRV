@@ -1,6 +1,7 @@
 #include "MipsCPU.h"
 
 
+using instruction32 = uint32_t;
 void MipsCPU::tick()
 {
     fetch();
@@ -12,6 +13,13 @@ void MipsCPU::tick()
 
 void MipsCPU::fetch()
 {
+    // get instruction from memory at pc
+    instruction32 fetched = 0; // TODO: read from memory
+
+
+
+
+    pc += 4;
 
 }
 
