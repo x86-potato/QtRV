@@ -45,16 +45,16 @@ class Registers
     uint32_t ra = 0;
 };
 
-class GP
-{
-
-};
 
 class MipsCPU
 {
 public:
     uint32_t pc = 0;
     Registers regs;
+    uint32_t text = 0x00400000;
+    uint32_t data = 0x10010000;
+    uint32_t stack = 0x7FFFFFFC;
+
 
     void tick();
 
