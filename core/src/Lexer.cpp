@@ -94,8 +94,21 @@ Token Lexer::readString()
     std::string val;
     int startLine = m_line;
     while (m_pos < m_source.size() && current() != '"') {
-        if (current() == '\\') { advance(); } // skip escape prefix; include next char
-        val += current(); advance();
+        if (current() == '\\') {
+            advance(); // consume backslash
+            switch (current()) {
+                case 'n':  val += '\n'; break;
+                case 't':  val += '\t'; break;
+                case 'r':  val += '\r'; break;
+                case '0':  val += '\0'; break;
+                case '\\': val += '\\'; break;
+                case '"':  val += '"';  break;
+                default:   val += current(); break;
+            }
+        } else {
+            val += current();
+        }
+        advance();
     }
     if (current() == '"') advance(); // consume closing quote
     return Token(TokenType::STRING, val, startLine);

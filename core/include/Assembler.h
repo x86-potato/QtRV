@@ -3,6 +3,8 @@
 #include <vector>
 #include <variant>
 #include <unordered_map>
+#include <stdexcept>
+#include <string>
 
 #include "Tokens.h"
 #include "IR.h"
@@ -87,9 +89,10 @@ const inline BinaryMap TokenToBinary(const std::string &token)
         {"$ra",   {5, 31}},
     };
 
-    auto located = TokenToBinaryMap.find(token)->second;
-
-    return located;
+    auto it = TokenToBinaryMap.find(token);
+    if (it == TokenToBinaryMap.end())
+        throw std::runtime_error("Unknown token in binary map: " + token);
+    return it->second;
 
 }
 
@@ -97,14 +100,16 @@ const inline BinaryMap TokenToBinary(const std::string &token)
 enum class InstrType { I_TYPE, R_TYPE, J_TYPE };
 
 // Describes how to map assembly operands to machine-code fields.
-// Indices refer to positions in Instruction::operands.
-// A value of -1 means the field is not used by this instruction.
+// Indices refer to positions in Instruction::operands; -1 = implicit 0.
 struct InstrDesc
 {
     InstrType type;
-    int       rs_idx;  // source register
-    int       rt_idx;  // target register
-    int       imm_idx; // immediate
+    int       rs_idx    = -1;  // source register
+    int       rt_idx    = -1;  // target register
+    int       imm_idx   = -1;  // immediate (I-type)
+    int       rd_idx    = -1;  // destination register (R-type)
+    int       shamt_idx = -1;  // shift amount operand index (R-type), -1 = 0
+    uint8_t   funct     =  0;  // function code (R-type)
 };
 
 class Assembler

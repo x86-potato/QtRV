@@ -110,8 +110,12 @@ void MemoryPanel::refreshView()
 
         QString ascii;
         for (int col = 0; col < MEMORY_BYTES_PER_ROW; ++col) {
-            size_t idx = rowAddr + static_cast<size_t>(col);
-            uint8_t byte = (idx < m_size) ? m_mem[idx] : 0;
+            uint32_t byteAddr = rowAddr + static_cast<uint32_t>(col);
+            uint8_t byte = 0;
+            if (m_coreMemory) {
+                uint8_t *p = m_coreMemory->readByte(byteAddr);
+                if (p) byte = *p;
+            }
 
             std::snprintf(buf, sizeof(buf), "%02X", byte);
             auto *byteItem = new QTableWidgetItem(QString(buf));
@@ -135,16 +139,15 @@ void MemoryPanel::refreshView()
         .arg(m_baseAddress, 8, 16, QChar('0')).toUpper()
         .arg(pageEnd,       8, 16, QChar('0')).toUpper());
 
-    m_prevButton->setEnabled(m_baseAddress >= MEMORY_PAGE_SIZE);
-    m_nextButton->setEnabled(m_baseAddress + MEMORY_PAGE_SIZE < m_size);
+    m_prevButton->setEnabled(m_baseAddress >= static_cast<uint32_t>(MEMORY_PAGE_SIZE));
+    m_nextButton->setEnabled(m_baseAddress <= 0xFFFFFFFFu - static_cast<uint32_t>(MEMORY_PAGE_SIZE));
 }
 
-void MemoryPanel::setMemory(const uint8_t *data, size_t size)
+void MemoryPanel::setMemory(Memory *mem, uint32_t jumpTo)
 {
-    m_mem      = data;
-    m_memEdit  = nullptr;   // read-only source; manual edits won't write back
-    m_size     = size;
-    m_baseAddress = 0;
+    m_coreMemory  = mem;
+    m_baseAddress = (jumpTo / static_cast<uint32_t>(MEMORY_PAGE_SIZE))
+                    * static_cast<uint32_t>(MEMORY_PAGE_SIZE);
     refreshView();
 }
 
@@ -152,8 +155,6 @@ void MemoryPanel::goToAddress(uint32_t address)
 {
     // Align down to page boundary
     m_baseAddress = (address / MEMORY_PAGE_SIZE) * MEMORY_PAGE_SIZE;
-    if (m_baseAddress >= m_size)
-        m_baseAddress = 0;
     refreshView();
 }
 
@@ -171,7 +172,7 @@ void MemoryPanel::onGoToClicked()
 void MemoryPanel::onNextPageClicked()
 {
     uint32_t next = m_baseAddress + MEMORY_PAGE_SIZE;
-    if (next < m_size) {
+    if (next > m_baseAddress) {   // overflow guard
         m_baseAddress = next;
         refreshView();
     }
@@ -209,13 +210,12 @@ void MemoryPanel::onCellChanged(int row, int col)
     item->setText(QString(buf));
     m_table->blockSignals(false);
 
-    // Write to writable backing memory if available
-    size_t byteCol = static_cast<size_t>(col - 1);
-    size_t idx = m_baseAddress + static_cast<size_t>(row) * MEMORY_BYTES_PER_ROW + byteCol;
-    if (m_memEdit && idx < m_size)
-        m_memEdit[idx] = val;
-    else
-        m_dummyMem[idx < DUMMY_SIZE ? idx : 0] = val;
+    // Write through to sparse Memory if available
+    uint32_t addr = m_baseAddress
+                  + static_cast<uint32_t>(row) * MEMORY_BYTES_PER_ROW
+                  + static_cast<uint32_t>(col - 1);
+    if (m_coreMemory)
+        m_coreMemory->writeByte(addr, val);
 
     // Refresh ASCII column for this row only
     QString ascii;

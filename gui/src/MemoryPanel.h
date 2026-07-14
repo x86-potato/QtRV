@@ -8,6 +8,7 @@
 #include <QMenu>
 #include <cstdint>
 #include <deque>
+#include "Memory.h"
 
 // Number of bytes shown per page
 static constexpr int MEMORY_PAGE_SIZE  = 256;
@@ -21,8 +22,11 @@ class MemoryPanel : public QDockWidget
 public:
     explicit MemoryPanel(QWidget *parent = nullptr);
 
-    // Replace the backing memory shown (call after each step/run)
-    void setMemory(const uint8_t *data, size_t size);
+    // Set the sparse Memory object to display; jumps view to jumpTo address.
+    void setMemory(Memory *mem, uint32_t jumpTo = 0);
+
+    // Redraw the current page without changing the base address.
+    void refresh() { refreshView(); }
 
     // Jump to a specific byte address
     void goToAddress(uint32_t address);
@@ -53,12 +57,8 @@ private:
     void pushHistory(uint32_t address);
     void rebuildHistoryMenu();
 
-    // Dummy memory for now — replaced by setMemory() once core is wired up
-    static constexpr size_t DUMMY_SIZE = 4096;
-    uint8_t  m_dummyMem[DUMMY_SIZE] = {};
-    const uint8_t *m_mem     = m_dummyMem;
-    uint8_t       *m_memEdit = m_dummyMem;  // writable pointer for manual edits
-    size_t         m_size    = DUMMY_SIZE;
+    // Sparse Memory pointer (owned by Emulator)
+    Memory  *m_coreMemory  = nullptr;
 
     uint32_t m_baseAddress = 0;   // first address shown on current page
 };

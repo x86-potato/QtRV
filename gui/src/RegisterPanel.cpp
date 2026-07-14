@@ -48,42 +48,63 @@ RegisterPanel::RegisterPanel(QWidget *parent)
 void RegisterPanel::buildTable()
 {
     // Rows: 32 GP registers + 1 PC row
-    m_table->setColumnCount(3);
+    m_table->setColumnCount(5);
     m_table->setRowCount(33);
-    m_table->setHorizontalHeaderLabels({ "Reg", "Num", "Value (hex)" });
+    m_table->setHorizontalHeaderLabels({ "Reg", "Num", "Hex", "Decimal", "ASCII" });
 
     for (int i = 0; i < 32; ++i) {
         m_table->setItem(i, 0, new QTableWidgetItem(kRegNames[i]));
         m_table->setItem(i, 1, new QTableWidgetItem(kRegNumbers[i]));
         m_table->setItem(i, 2, new QTableWidgetItem("0x00000000"));
+        m_table->setItem(i, 3, new QTableWidgetItem("0"));
+        m_table->setItem(i, 4, new QTableWidgetItem(""));
     }
 
     // PC row
     m_table->setItem(32, 0, new QTableWidgetItem("PC"));
     m_table->setItem(32, 1, new QTableWidgetItem(""));
     m_table->setItem(32, 2, new QTableWidgetItem("0x00000000"));
+    m_table->setItem(32, 3, new QTableWidgetItem("0"));
+    m_table->setItem(32, 4, new QTableWidgetItem(""));
 
     m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
 }
 
 void RegisterPanel::setRegisters(const std::array<uint32_t, 32>& regs, uint32_t pc)
 {
-    for (int i = 0; i < 32; ++i) {
-        auto *item = m_table->item(i, 2);
-        if (item)
-            item->setText(QString("0x%1").arg(regs[i], 8, 16, QChar('0')).toUpper());
-    }
-    auto *pcItem = m_table->item(32, 2);
-    if (pcItem)
-        pcItem->setText(QString("0x%1").arg(pc, 8, 16, QChar('0')).toUpper());
+    auto fillRow = [&](int row, uint32_t val, bool showAscii) {
+        // Hex
+        if (auto *it = m_table->item(row, 2))
+            it->setText(QString("0x%1").arg(val, 8, 16, QChar('0')).toUpper());
+        // Decimal (signed)
+        if (auto *it = m_table->item(row, 3))
+            it->setText(QString::number(static_cast<int32_t>(val)));
+        // ASCII — show up to 4 printable chars packed in the word (big-endian byte order)
+        if (auto *it = m_table->item(row, 4)) {
+            if (!showAscii) { it->setText(""); return; }
+            QString ascii;
+            for (int shift = 24; shift >= 0; shift -= 8) {
+                uint8_t b = static_cast<uint8_t>((val >> shift) & 0xFF);
+                ascii += (b >= 0x20 && b < 0x7F) ? QChar(b) : QChar('.');
+            }
+            it->setText(ascii);
+        }
+    };
+
+    for (int i = 0; i < 32; ++i)
+        fillRow(i, regs[i], true);
+
+    fillRow(32, pc, false);   // PC: decimal/hex only, no ASCII
 }
 
 void RegisterPanel::highlightRegister(int index)
 {
     if (index < 0 || index >= 32) return;
-    for (int col = 0; col < 3; ++col) {
+    for (int col = 0; col < 5; ++col) {
         auto *item = m_table->item(index, col);
         if (item)
             item->setBackground(QColor(42, 130, 218, 80));

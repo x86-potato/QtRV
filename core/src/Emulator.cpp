@@ -58,7 +58,8 @@ void Emulator::debugIR(const Program& program)
 
 void Emulator::reset()
 {
-    m_cpu.pc = 0;
-    m_cpu.regs = Registers{};
+    m_cpu = MipsCPU{};   // resets pc, registers, halted, decoded fields
+    m_memory = Memory{};
+    m_buffer.clear();
     m_errors.clear();
 }

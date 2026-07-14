@@ -26,6 +26,7 @@ private:
     void setupCentralWidget();
 
     void updateConsole();
+    void updatePanels();   // refresh registers, memory, console after any CPU change
 
     const std::string &textFromEditor() const;
 
@@ -33,4 +34,5 @@ private:
     Console       *m_console       = nullptr;
     MemoryPanel   *m_memoryPanel   = nullptr;
     RegisterPanel *m_registerPanel = nullptr;
+    bool           m_programLoaded = false;
 };
