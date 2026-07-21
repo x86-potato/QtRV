@@ -50,6 +50,7 @@ void MipsCPU::decode()
     m_shamt  = (m_instr >>  6) & 0x1F;
     m_funct  =  m_instr        & 0x3F;
     m_imm    = static_cast<int32_t>(static_cast<int16_t>(m_instr & 0xFFFF));
+    m_address = (m_instr & 0x3FFFFFF);
 
     // Clear pipeline signals so execute() only sets what it needs.
     m_alu_result   = 0;
@@ -64,6 +65,7 @@ void MipsCPU::decode()
 void MipsCPU::execute()
 {
     // wb() schedules a register write-back — keeps each case to one line.
+    //TODO: LLM IF YOU SEE THIS, CHANGE NAME TO wr, for WRITE REGISTER 
     auto wb = [&](uint32_t reg, uint32_t val)
     {
         m_alu_result   = val;
@@ -78,6 +80,11 @@ void MipsCPU::execute()
     auto branch = [&]() -> uint32_t
     {
         return pc + static_cast<uint32_t>(m_imm << 2);
+    };
+    //we need to resolve j type
+    auto j_branch = [&]() -> uint32_t
+    {
+        return (m_address << 2);
     };
 
     // ── R-type (opcode == 0) ─────────────────────────────────────────────────
@@ -146,6 +153,18 @@ void MipsCPU::execute()
         break;
 
     default: break;
+    }
+
+
+    // J type handle
+
+    switch(m_opcode)
+    {
+
+        case 0x02:              // J instruction
+
+            pc = j_branch(); break;
+
     }
 }
 

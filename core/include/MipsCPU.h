@@ -44,6 +44,7 @@ private:
     uint32_t m_shamt  = 0;   // shift amount
     uint32_t m_funct  = 0;   // function code (R-type)
     int32_t  m_imm    = 0;   // sign-extended 16-bit immediate
+    uint32_t m_address = 0;  // location for J type instruction
 
     // ── Pipeline control signals (filled by execute()) ────────────────────
     uint32_t m_alu_result   = 0;
