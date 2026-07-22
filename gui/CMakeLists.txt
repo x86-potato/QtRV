@@ -7,6 +7,8 @@ add_executable(QTRv
     src/MemoryPanel.h
     src/RegisterPanel.cpp
     src/RegisterPanel.h
+    src/CodeEditor.cpp
+    src/CodeEditor.h
 )
 
 set_target_properties(QTRv PROPERTIES

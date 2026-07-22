@@ -28,7 +28,7 @@ void Emulator::debugTokens(const std::vector<Token>& tokens)
             m_buffer.m_data += '\n';
             continue;
         }
-        m_buffer.m_data += '[' + std::string(tokenTypeName(tok.type)) + ' ' + tok.value + ']';
+        m_buffer.m_data += '[' + std::string(tokenTypeName(tok.type)) + ' ' + tok.value + ']' + " (line " + std::to_string(tok.line) + ")\n";
     }
 }
 
@@ -53,6 +53,26 @@ void Emulator::debugIR(const Program& program)
                 m_buffer.m_data += '\n';
             }
         }, node);
+    }
+}
+
+
+void Emulator::setBreakpoint(uint32_t line_number, bool enabled)
+{
+    if (enabled)
+    {
+        m_breakpoint_lines.insert(line_number);
+    }
+    else
+    {
+        m_breakpoint_lines.erase(line_number);
+    }
+
+    //if program is loaded, set the breakpoint in the CPU
+    if (m_lineToPCMap.find(line_number + 1) != m_lineToPCMap.end())
+    {
+        uint32_t pc = m_lineToPCMap[line_number + 1];
+        m_cpu.setBreakpoint(pc, enabled);
     }
 }
 

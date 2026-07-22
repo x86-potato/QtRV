@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <stdexcept>
 #include <string>
+#include <map>
 
 #include "Tokens.h"
 #include "IR.h"
@@ -115,6 +116,9 @@ struct InstrDesc
 class Assembler
 {
 public:
+    std::map<uint32_t, uint32_t> PCtoLine; // Maps source line numbers to program counter addresses
+    std::map<uint32_t, uint32_t> LinetoPC; // Maps program counter addresses to source line numbers
+
     Assembler() = default;
 
     Binary assemble(const std::vector<IR> &IR_INPUT);

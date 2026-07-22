@@ -8,6 +8,41 @@
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
       }
+    },
+    {
+      "name": "debug",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "prod",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/build/prod",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_BUILD_TYPE": "Release",
+        
+        "CMAKE_CXX_FLAGS_RELEASE": "/O2 /Oi /Gy /DNDEBUG",
+        "CMAKE_C_FLAGS_RELEASE": "/O2 /Oi /Gy /DNDEBUG",
+        
+        "CMAKE_SHARED_LINKER_FLAGS_RELEASE": "/DEBUG:NONE",
+        "CMAKE_EXE_LINKER_FLAGS_RELEASE": "/DEBUG:NONE"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug-build",
+      "configurePreset": "debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "prod-build",
+      "configurePreset": "prod",
+      "configuration": "Release"
     }
   ]
 }

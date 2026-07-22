@@ -14,6 +14,8 @@
 #include "Memory.h"
 #include "Loader.h"
 
+using PCtoLine = std::map<uint32_t, uint32_t>; 
+using LinetoPC = std::map<uint32_t, uint32_t>; 
 
 class Emulator
 {
@@ -25,16 +27,15 @@ public:
     {
         reset();
         auto tokens = m_lexer.tokenize(source);
-        //debugTokens(tokens);
         callback();
 
         auto IR = m_parser.parse(tokens);
-        //debugIR(IR);
         callback();
 
         auto binary = m_assembler.assemble(IR);
+        m_PCtoLineMap = std::move(m_assembler.PCtoLine);
+        m_lineToPCMap = std::move(m_assembler.LinetoPC);
 
-        // Load text + data segments into memory at their canonical MIPS addresses
         Loader::load(binary, m_memory, m_cpu.text, m_cpu.data);
         m_cpu.pc      = m_cpu.text;
         m_cpu.textEnd = m_cpu.text + static_cast<uint32_t>(binary.bin.size());
@@ -42,15 +43,34 @@ public:
         m_cpu.setOutput(&m_buffer);
         m_cpu.setInputCallback(m_inputCallback);
 
+        InitBreakpoints();
+
         return true;
     }
 
     template <typename Callback>
-    void run(Callback callback, uint32_t maxCycles = 1000000)
+    void run(Callback callback, uint32_t maxCycles = UINT32_MAX)
     {
+        // Don't run if the program ended naturally
+        if (m_cpu.halted() && !m_cpu.m_breakpointHit) return;
+
+        // If we are parked on a breakpoint, configure CPU to step past it
+        if (m_cpu.m_breakpointHit) {
+            m_cpu.m_halted = false;
+            m_cpu.m_breakpointHit = false;
+            m_cpu.m_ignoreNextBreakpoint = true;
+        }
+
         uint32_t cycles = 0;
         while (!m_cpu.halted() && cycles < maxCycles) {
             m_cpu.tick();
+            
+            // If the tick naturally hit a breakpoint, break the run loop
+            if (m_cpu.m_breakpointHit) {
+                callback();
+                break;
+            }
+            
             ++cycles;
             callback();
         }
@@ -66,10 +86,36 @@ public:
         m_inputCallback = std::move(cb);
     }
 
-    // Single-instruction step; no-op if halted or no program loaded.
-    void step() { if (!m_cpu.halted()) m_cpu.tick(); }
+    void step() { 
+        if (m_cpu.halted() && !m_cpu.m_breakpointHit) return; // Ignore if program finished naturally
 
+        // If stepping from a breakpoint, step past it
+        if (m_cpu.m_breakpointHit) {
+            m_cpu.m_breakpointHit = false;
+            m_cpu.m_halted = false;
+            m_cpu.m_ignoreNextBreakpoint = true;
+        } 
+        
+        m_cpu.tick(); 
+    }
+
+    void setBreakpoint(uint32_t pc, bool enabled);
+
+    void InitBreakpoints()
+    {
+        for (const auto& line : m_breakpoint_lines)
+        {
+            if (m_lineToPCMap.find(line+1) != m_lineToPCMap.end())
+            {
+                uint32_t pc = m_lineToPCMap[line+1];
+                m_cpu.setBreakpoint(pc, true);
+            }
+        }
+    }
+    
     bool halted() const { return m_cpu.halted(); }
+    bool isFinished() const { return m_cpu.halted() && !m_cpu.m_breakpointHit; }
+    bool isBreakpoint() const { return m_cpu.m_breakpointHit; }
 
     std::array<uint32_t, 32> registers() const
     {
@@ -86,6 +132,9 @@ public:
     uint32_t textBase() const { return m_cpu.text; }
 
     Buffer m_buffer;
+    PCtoLine    m_PCtoLineMap; 
+    LinetoPC    m_lineToPCMap;
+    std::unordered_set<uint32_t> m_breakpoint_lines; 
 
 private:
     MipsCPU     m_cpu;
@@ -93,8 +142,7 @@ private:
     Lexer       m_lexer;
     Parser      m_parser;
     Assembler   m_assembler;
+
     std::function<std::string(const std::string&)> m_inputCallback;
-
-
     std::vector<std::string> m_errors;
 };

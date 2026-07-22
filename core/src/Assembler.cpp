@@ -204,12 +204,21 @@ Binary Assembler::assemble(const std::vector<IR> &IR_INPUT)
 
                     if (seg == Seg::DATA && n.name == ".word")
                     {
+                        // --- 1. FORCE 4-BYTE ALIGNMENT ---
+                        while (dataOffset % 4 != 0) {
+                            bin.dataBin.push_back(0x00);
+                            dataOffset++;
+                        }
+
+                        // --- 2. NOW MAP THE LABEL ---
                         if (!pendingLabel.empty())
                         {
                             dataLabelMap[pendingLabel] =
                                 static_cast<int32_t>(DATA_BASE + dataOffset);
                             pendingLabel.clear();
                         }
+
+                        // --- 3. WRITE THE WORDS ---
                         for (const auto &arg : n.args)
                         {
                             uint32_t w = static_cast<uint32_t>(
@@ -219,6 +228,33 @@ Binary Assembler::assemble(const std::vector<IR> &IR_INPUT)
                             bin.dataBin.push_back((w >> 16) & 0xFF);
                             bin.dataBin.push_back((w >> 24) & 0xFF);
                             dataOffset += 4;
+                        }
+                    }
+                    else if (seg == Seg::DATA && n.name == ".space")
+                    {
+                        //force alignment to 4 bytes
+                        while (dataOffset % 4 != 0) {
+                            bin.dataBin.push_back(0x00);
+                            dataOffset++;
+                        }
+
+                        if (!pendingLabel.empty())
+                        {
+                            dataLabelMap[pendingLabel] =
+                                static_cast<int32_t>(DATA_BASE + dataOffset);
+                            pendingLabel.clear();
+                        }
+
+                        if (!n.args.empty())
+                        {
+                            uint32_t bytesToAlloc = static_cast<uint32_t>(
+                                parseImm(n.args[0].value, ".space", 0));
+                                
+                            for (uint32_t i = 0; i < bytesToAlloc; ++i)
+                            {
+                                bin.dataBin.push_back(0x00);
+                                dataOffset++;
+                            }
                         }
                     }
 
@@ -274,36 +310,62 @@ Binary Assembler::assemble(const std::vector<IR> &IR_INPUT)
     if (main_idx == IR_INPUT.size())
         throw std::runtime_error("Assembler: 'main' label not found in IR");
 
-    // ── Pass 3 : build text-segment label map ─────────────────────────────────
+// ── Pass 3 : build text-segment label map ─────────────────────────────────
     // Text labels are stored as ABSOLUTE addresses (TEXT_BASE + byte_offset).
     // Data labels (already absolute) are merged in so all symbols resolve uniformly.
     static constexpr uint32_t TEXT_BASE = 0x00400000u;
     std::unordered_map<std::string, int32_t> labelMap = dataLabelMap;
     {
+        enum class Seg { NONE, TEXT, DATA } seg = Seg::TEXT; // assume text initially after main
         int32_t offset = 0;
+        
         for (size_t i = main_idx + 1; i < IR_INPUT.size(); ++i)
         {
             std::visit([&](auto &&node)
             {
                 using T = std::decay_t<decltype(node)>;
-                if constexpr (std::is_same_v<T, Label>)
-                    labelMap[node.name] = static_cast<int32_t>(TEXT_BASE) + offset;
+                
+                if constexpr (std::is_same_v<T, Directive>)
+                {
+                    // Track which segment we are currently in
+                    if (node.name == ".data") seg = Seg::DATA;
+                    else if (node.name == ".text") seg = Seg::TEXT;
+                }
+                else if constexpr (std::is_same_v<T, Label>)
+                {
+                    // ONLY overwrite if it's a text label. Data labels keep their Pass 1 address.
+                    if (seg == Seg::TEXT)
+                        labelMap[node.name] = static_cast<int32_t>(TEXT_BASE) + offset;
+                }
                 else if constexpr (std::is_same_v<T, Instruction>)
-                    offset += (node.opcode == "la") ? 8 : 4;  // la expands to 2 words
+                {
+                    if (seg == Seg::TEXT)
+                        offset += (node.opcode == "la") ? 8 : 4;  // la expands to 2 words
+                }
             }, IR_INPUT[i]);
         }
     }
 
     // ── Pass 4 : emit text instructions ──────────────────────────────────────
     int32_t currentAbsAddr = static_cast<int32_t>(TEXT_BASE);
+    enum class Seg { NONE, TEXT, DATA } seg = Seg::TEXT;
+    
     for (size_t i = main_idx + 1; i < IR_INPUT.size(); ++i)
     {
         std::visit([&](auto &&ir)
         {
             using T = std::decay_t<decltype(ir)>;
 
-            if constexpr (std::is_same_v<T, Instruction>)
+            if constexpr (std::is_same_v<T, Directive>)
             {
+                if (ir.name == ".data") seg = Seg::DATA;
+                else if (ir.name == ".text") seg = Seg::TEXT;
+            }
+            else if constexpr (std::is_same_v<T, Instruction>)
+            {
+                // Only encode instructions if we are actively in the text segment
+                if (seg != Seg::TEXT) return;
+
                 if (ir.opcode == "la")
                 {
                     // Pseudo: la $rd, label  ->  lui $rd, upper16  +  ori $rd, $rd, lower16
@@ -323,8 +385,18 @@ Binary Assembler::assemble(const std::vector<IR> &IR_INPUT)
                     }
                     uint32_t upper = (static_cast<uint32_t>(addr) >> 16) & 0xFFFF;
                     uint32_t lower =  static_cast<uint32_t>(addr)        & 0xFFFF;
+                    
                     pushWord(bin, (0x0Fu << 26) | (rd << 16) | upper);              // lui
                     pushWord(bin, (0x0Du << 26) | (rd << 21) | (rd << 16) | lower); // ori
+
+                    // PATCH: Map both the lui and ori instruction to the same line number 
+                    // so the UI debugger highlight doesn't skip a beat
+                    PCtoLine[currentAbsAddr] = static_cast<uint32_t>(ir.line);
+                    PCtoLine[currentAbsAddr + 4] = static_cast<uint32_t>(ir.line); 
+
+                    LinetoPC[ir.line] = static_cast<uint32_t>(currentAbsAddr);
+                    LinetoPC[ir.line] = static_cast<uint32_t>(currentAbsAddr + 4);
+                    
                     currentAbsAddr += 8;
                 }
                 else if (ir.opcode == "j" || ir.opcode == "jal")
@@ -345,6 +417,8 @@ Binary Assembler::assemble(const std::vector<IR> &IR_INPUT)
                     }
                     uint32_t opcode = (ir.opcode == "jal") ? 0x03u : 0x02u;
                     pushWord(bin, (opcode << 26) | ((absAddr >> 2) & 0x3FFFFFFu));
+                    PCtoLine[currentAbsAddr] = static_cast<uint32_t>(ir.line);
+                    LinetoPC[ir.line] = static_cast<uint32_t>(currentAbsAddr);
                     currentAbsAddr += 4;
                 }
                 else
@@ -360,6 +434,8 @@ Binary Assembler::assemble(const std::vector<IR> &IR_INPUT)
                     else if (desc.type == InstrType::R_TYPE)
                         pushWord(bin, encodeRType(ir, desc));
 
+                    PCtoLine[currentAbsAddr] = static_cast<uint32_t>(ir.line);
+                    LinetoPC[ir.line] = static_cast<uint32_t>(currentAbsAddr);
                     currentAbsAddr += 4;
                 }
             }

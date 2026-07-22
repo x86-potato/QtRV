@@ -6,6 +6,8 @@
 
 #include <memory>
 
+class QTabWidget;
+class CodeEditor;
 class Console;
 class MemoryPanel;
 class RegisterPanel;
@@ -18,6 +20,14 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override = default;
 
+private slots:
+    void onFileNew();
+    void onFileOpen();
+    bool onFileSave();
+    bool onFileSaveAs();
+    void onTabCloseRequested(int index);
+    void onEditorModificationChanged(bool modified);
+
 private:
     void setupMenuBar();
     void setupToolBar();
@@ -27,6 +37,13 @@ private:
 
     void updateConsole();
     void updatePanels();   // refresh registers, memory, console after any CPU change
+
+    CodeEditor* currentEditor() const;
+    CodeEditor* createEditorTab(const QString &title, const QString &filePath = "");
+    bool saveEditor(CodeEditor *editor, bool saveAs);
+    bool maybeSave(int tabIndex);
+
+    QTabWidget *m_tabWidget = nullptr;
 
     const std::string &textFromEditor() const;
 

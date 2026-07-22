@@ -63,7 +63,7 @@ MemoryPanel::MemoryPanel(QWidget *parent)
     connect(m_table,        &QTableWidget::cellChanged,  this, &MemoryPanel::onCellChanged);
     connect(m_historyButton,&QPushButton::clicked, this, [this]() {
         if (m_historyMenu->isEmpty()) return;
-        m_historyMenu->popup(m_historyButton->mapToGlobal(
+        m_historyMenu->exec(m_historyButton->mapToGlobal(
             m_historyButton->rect().bottomLeft()));
     });
     connect(m_historyMenu, &QMenu::triggered, this, &MemoryPanel::onHistoryTriggered);

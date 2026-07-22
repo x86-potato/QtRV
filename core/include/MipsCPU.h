@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_set>
+
 #include "Memory.h"
 #include "Buffer.h"
 
@@ -9,17 +11,21 @@ class MipsCPU
 {
 public:
     uint32_t r[32] = {};   // general-purpose registers; r[0] always 0
+    uint32_t hi = 0;      // high register for mult/div
+    uint32_t lo = 0;      // low register for mult/div
     uint32_t pc     = 0;
     uint32_t text   = 0x00400000;
     uint32_t textEnd = 0;           // one past the last loaded instruction byte
     uint32_t data   = 0x10010000;
     uint32_t stack  = 0x7FFFFFFC;
 
+    bool     m_halted = false;
+    bool     m_breakpointHit = false;
+    bool     m_ignoreNextBreakpoint = false;
+
     void setMemory(Memory* m) { m_mem = m; }
     void setOutput(Buffer*  b) { m_out = b; }
 
-    // Called when the program executes a read syscall.
-    // The callback receives a prompt string and returns the user's input.
     void setInputCallback(std::function<std::string(const std::string&)> cb)
     {
         m_inputCallback = std::move(cb);
@@ -27,29 +33,37 @@ public:
 
     bool halted() const { return m_halted; }
 
+    void setBreakpoint(uint32_t pc, bool enabled)
+    {
+        if (enabled)
+            m_breakpoints.insert(pc);
+        else
+            m_breakpoints.erase(pc);
+    }
+
+    std::unordered_set<uint32_t> m_breakpoints;
     void tick();
 
 private:
     Memory*  m_mem    = nullptr;
     Buffer*  m_out    = nullptr;
     std::function<std::string(const std::string&)> m_inputCallback;
-    bool     m_halted = false;
-    uint32_t m_instr  = 0;   // raw instruction word from fetch
+    uint32_t m_instr  = 0;
 
-    // ── Decoded instruction fields (filled by decode()) ───────────────────
+    // ── Decoded instruction fields ───────────────────────────────────────────
     uint32_t m_opcode = 0;
-    uint32_t m_rs     = 0;   // source register index
-    uint32_t m_rt     = 0;   // target register index
-    uint32_t m_rd     = 0;   // destination register index (R-type)
-    uint32_t m_shamt  = 0;   // shift amount
-    uint32_t m_funct  = 0;   // function code (R-type)
-    int32_t  m_imm    = 0;   // sign-extended 16-bit immediate
-    uint32_t m_address = 0;  // location for J type instruction
+    uint32_t m_rs     = 0;
+    uint32_t m_rt     = 0;
+    uint32_t m_rd     = 0;
+    uint32_t m_shamt  = 0;
+    uint32_t m_funct  = 0;
+    int32_t  m_imm    = 0;
+    uint32_t m_address = 0;
 
-    // ── Pipeline control signals (filled by execute()) ────────────────────
+    // ── Pipeline control signals ─────────────────────────────────────────────
     uint32_t m_alu_result   = 0;
-    uint32_t m_wb_reg       = 0;     // register index to write back to
-    bool     m_do_writeback = false; // whether writeBack() stores a result
+    uint32_t m_wb_reg       = 0;
+    bool     m_do_writeback = false;
 
     void fetch();
     void decode();
