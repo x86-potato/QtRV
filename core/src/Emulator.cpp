@@ -78,6 +78,17 @@ void Emulator::setBreakpoint(uint32_t line_number, bool enabled)
 
 void Emulator::reset()
 {
+    m_cpu.m_halted = false;
+    m_cpu.m_breakpointHit = false;
+    m_cpu.pc = m_cpu.text;
+    
+    // --- ADD THESE LINES TO CLEAR THE PIPELINE ---
+    m_globalCycle = 0;
+    m_pipelineHistory.clear();
+    for (int i = 0; i < 5; ++i) {
+        m_activeInsts[i] = -1;
+    }
+    
     m_cpu = MipsCPU{};   // resets pc, registers, halted, decoded fields
     m_memory = Memory{};
     m_buffer.clear();

@@ -8,6 +8,7 @@ add_library(core STATIC
     include/Buffer.h
     include/IR.h
     src/Memory.cpp
+    include/InstructionState.h
 )
 
 target_include_directories(core

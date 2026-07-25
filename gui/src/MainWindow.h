@@ -11,6 +11,7 @@ class CodeEditor;
 class Console;
 class MemoryPanel;
 class RegisterPanel;
+class PipelinePanel;
 
 class MainWindow : public QMainWindow
 {
@@ -27,6 +28,10 @@ private slots:
     bool onFileSaveAs();
     void onTabCloseRequested(int index);
     void onEditorModificationChanged(bool modified);
+    void onRunClicked();
+    void onStepClicked();
+    void onRunTimerTick();
+
 
 private:
     void setupMenuBar();
@@ -34,6 +39,12 @@ private:
     void setupStatusBar();
     void setupDocks();
     void setupCentralWidget();
+
+    QTimer *m_runTimer = nullptr;
+    QAction *m_runAction = nullptr;
+    QStringList m_sourceCache;
+
+    int m_cpuSpeed = 100; // 1-100 (100 = Realtime)
 
     void updateConsole();
     void updatePanels();   // refresh registers, memory, console after any CPU change
@@ -51,5 +62,6 @@ private:
     Console       *m_console       = nullptr;
     MemoryPanel   *m_memoryPanel   = nullptr;
     RegisterPanel *m_registerPanel = nullptr;
+    PipelinePanel *m_pipelinePanel = nullptr;
     bool           m_programLoaded = false;
 };

@@ -43,8 +43,8 @@ public:
 
     std::unordered_set<uint32_t> m_breakpoints;
     void tick();
+    void cycleTick(); // For pipeline mode, executes one cycle of the CPU
 
-private:
     Memory*  m_mem    = nullptr;
     Buffer*  m_out    = nullptr;
     std::function<std::string(const std::string&)> m_inputCallback;
@@ -64,6 +64,56 @@ private:
     uint32_t m_alu_result   = 0;
     uint32_t m_wb_reg       = 0;
     bool     m_do_writeback = false;
+    bool     m_stall = false;
+
+    // --------------------------------------------------------
+    // PIPELINE LATCHES (Context-Switching Design)
+    // --------------------------------------------------------
+    
+    struct IF_ID_Latch {
+        bool valid = false;
+        uint32_t pc = 0; // PC + 4
+        uint32_t instruction = 0;
+    } IF_ID;
+
+    struct ID_EX_Latch {
+        bool valid = false;
+        uint32_t pc = 0;
+        uint32_t instruction = 0;
+        
+        // Saved Decode Context
+        uint32_t opcode = 0, rs = 0, rt = 0, rd = 0;
+        uint32_t shamt = 0, funct = 0, address = 0;
+        int32_t  imm = 0;
+        uint32_t dest_reg = 0;
+    } ID_EX;
+
+    struct EX_MEM_Latch {
+        bool valid = false;
+        uint32_t opcode = 0;
+        uint32_t rt = 0;
+        
+        // Output from execute()
+        uint32_t alu_result = 0;
+        uint32_t wb_reg = 0;
+        bool do_writeback = false;
+        uint32_t dest_reg = 0;
+    } EX_MEM;
+
+    struct MEM_WB_Latch {
+        bool valid = false;
+        // Output from memoryAccess()
+        uint32_t alu_result = 0;
+        uint32_t wb_reg = 0;
+        bool do_writeback = false;
+        uint32_t dest_reg = 0;
+    } MEM_WB;
+
+    void stageWB();
+    void stageMEM();
+    void stageEX();
+    void stageID();
+    void stageIF();
 
     void fetch();
     void decode();

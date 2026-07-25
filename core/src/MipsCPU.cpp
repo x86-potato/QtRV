@@ -2,7 +2,7 @@
 #include <string>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-static inline int32_t  signed32(uint32_t x)   { return static_cast<int32_t>(x); }
+static inline int32_t   signed32(uint32_t x)   { return static_cast<int32_t>(x); }
 static inline uint32_t uimm(uint32_t instr)    { return instr & 0xFFFF; }
 
 // ── Tick ─────────────────────────────────────────────────────────────────────
@@ -258,4 +258,178 @@ void MipsCPU::syscall_handler()
         break;
     default: break;
     }
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ── PIPELINE ARCHITECTURE (Cycle Accurate Datapath) ──────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
+void MipsCPU::cycleTick() 
+{
+    // If CPU is fully halted and all pipeline latches have drained, stop completely
+    if (m_halted && !IF_ID.valid && !ID_EX.valid && !EX_MEM.valid && !MEM_WB.valid) return;
+
+    m_stall = false;
+
+    // Evaluate stages RIGHT to LEFT
+    stageWB();
+    stageMEM();
+    stageEX();
+    stageID();
+    
+    // Only fetch if no hazard stall occurred AND the CPU hasn't halted (e.g. from EOF or syscall 10)
+    if (!m_stall && !m_halted) {
+        stageIF();
+    }
+}
+
+void MipsCPU::stageWB() {
+    if (!MEM_WB.valid) return;
+    
+    // Restore context and use existing writeBack logic
+    m_do_writeback = MEM_WB.do_writeback;
+    m_wb_reg       = MEM_WB.wb_reg;
+    m_alu_result   = MEM_WB.alu_result;
+    
+    writeBack();
+}
+
+void MipsCPU::stageMEM() {
+    MEM_WB.valid = EX_MEM.valid;
+    if (!EX_MEM.valid) return;
+
+    m_opcode       = EX_MEM.opcode;
+    m_rt           = EX_MEM.rt;
+    m_alu_result   = EX_MEM.alu_result;
+    m_wb_reg       = EX_MEM.wb_reg;
+    m_do_writeback = EX_MEM.do_writeback;
+
+    memoryAccess();
+
+    MEM_WB.alu_result   = m_alu_result;
+    MEM_WB.wb_reg       = m_wb_reg;
+    MEM_WB.do_writeback = m_do_writeback;
+    
+    // Pass the hazard tracker forward
+    MEM_WB.dest_reg     = EX_MEM.dest_reg; 
+}
+
+void MipsCPU::stageEX() {
+    EX_MEM.valid = ID_EX.valid;
+    if (!ID_EX.valid) return;
+
+    m_instr   = ID_EX.instruction;
+    m_opcode  = ID_EX.opcode;
+    m_rs      = ID_EX.rs;
+    m_rt      = ID_EX.rt;
+    m_rd      = ID_EX.rd;
+    m_shamt   = ID_EX.shamt;
+    m_funct   = ID_EX.funct;
+    m_imm     = ID_EX.imm;
+    m_address = ID_EX.address;
+    
+    uint32_t fetch_pc = pc; 
+    pc = ID_EX.pc; 
+    
+    m_alu_result = 0;
+    m_wb_reg = 0;
+    m_do_writeback = false;
+
+    execute(); 
+
+    if (pc != ID_EX.pc) {
+        IF_ID.valid = false;
+        m_halted = false;
+    } else {
+        pc = fetch_pc; 
+    }
+
+    EX_MEM.opcode       = m_opcode;
+    EX_MEM.rt           = m_rt;
+    EX_MEM.alu_result   = m_alu_result;
+    EX_MEM.wb_reg       = m_wb_reg;
+    EX_MEM.do_writeback = m_do_writeback;
+    
+    // Pass the hazard tracker forward
+    EX_MEM.dest_reg     = ID_EX.dest_reg; 
+}
+
+void MipsCPU::stageID() {
+    if (!IF_ID.valid) {
+        ID_EX.valid = false;
+        return;
+    }
+
+    m_instr = IF_ID.instruction;
+    decode(); 
+
+    // --- HAZARD DETECTION ---
+    bool hazard = false;
+    bool reads_rs = true;
+    bool reads_rt = true;
+    
+    if (m_opcode == 0x02 || m_opcode == 0x03 || m_opcode == 0x0F) reads_rs = false;
+    if (m_opcode != 0x00 && m_opcode != 0x2B && m_opcode != 0x28 && m_opcode != 0x29 && 
+        m_opcode != 0x04 && m_opcode != 0x05 && m_opcode != 0x06 && m_opcode != 0x07) {
+        reads_rt = false; 
+    }
+
+    // Identify where this instruction will write data
+    uint32_t dest_reg = 0;
+    if (m_opcode == 0x00) dest_reg = m_rd; // R-type
+    else if (m_opcode == 0x03) dest_reg = 31; // JAL
+    else if (m_opcode != 0x2B && m_opcode != 0x28 && m_opcode != 0x29 && 
+             m_opcode != 0x04 && m_opcode != 0x05 && m_opcode != 0x06 && m_opcode != 0x07 && m_opcode != 0x02) {
+        dest_reg = m_rt; // Loads and I-Type arithmetic
+    }
+    
+    // Stall if EX or MEM stages are computing a register we need
+    if (EX_MEM.valid && EX_MEM.dest_reg != 0) {
+        if (reads_rs && EX_MEM.dest_reg == m_rs) hazard = true;
+        if (reads_rt && EX_MEM.dest_reg == m_rt) hazard = true;
+    }
+    if (MEM_WB.valid && MEM_WB.dest_reg != 0) {
+        if (reads_rs && MEM_WB.dest_reg == m_rs) hazard = true;
+        if (reads_rt && MEM_WB.dest_reg == m_rt) hazard = true;
+    }
+    
+    if (m_opcode == 0x00 && m_funct == 0x0C) {
+        if (EX_MEM.valid || MEM_WB.valid) hazard = true;
+    }
+
+    if (hazard) {
+        ID_EX.valid = false;
+        m_stall = true;      
+        return;
+    }
+
+    ID_EX.valid   = true;
+    ID_EX.pc      = IF_ID.pc;
+    ID_EX.instruction = m_instr;
+    ID_EX.opcode  = m_opcode;
+    ID_EX.rs      = m_rs;
+    ID_EX.rt      = m_rt;
+    ID_EX.rd      = m_rd;
+    ID_EX.shamt   = m_shamt;
+    ID_EX.funct   = m_funct;
+    ID_EX.imm     = m_imm;
+    ID_EX.address = m_address;
+    
+    // Track hazard target
+    ID_EX.dest_reg = dest_reg;
+}
+
+void MipsCPU::stageIF() {
+    fetch(); // Modifies m_instr, advances pc by 4, and may set m_halted
+    
+    if (m_halted) {
+        // We reached EOF or unmapped memory. Invalidate fetch so pipeline can drain.
+        IF_ID.valid = false;
+        return;
+    }
+
+    IF_ID.instruction = m_instr;
+    IF_ID.pc          = pc; 
+    IF_ID.valid       = true;
 }

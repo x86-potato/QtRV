@@ -9,6 +9,8 @@ add_executable(QTRv
     src/RegisterPanel.h
     src/CodeEditor.cpp
     src/CodeEditor.h
+    src/PipelinePanel.h
+    src/PipelinePanel.cpp
 )
 
 set_target_properties(QTRv PROPERTIES

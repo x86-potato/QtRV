@@ -3,9 +3,15 @@
 #include "MemoryPanel.h"
 #include "RegisterPanel.h"
 #include "CodeEditor.h"
+#include "PipelinePanel.h"
 
 #include <stdexcept>
 #include <QApplication>
+#include <QTimer>
+#include <QToolButton>
+#include <QWidgetAction>
+#include <QSlider>
+#include <QVBoxLayout>
 #include <QMenuBar>
 #include <QToolBar>
 #include <QStatusBar>
@@ -40,6 +46,11 @@ MainWindow::MainWindow(QWidget *parent)
         return ok ? result.toStdString() : "";
     });
 
+    //start execution timer for running the emulator in real-time
+    m_runTimer = new QTimer(this);
+    connect(m_runTimer, &QTimer::timeout, this, &MainWindow::onRunTimerTick);
+
+
     setupCentralWidget();
     
     setupDocks();       
@@ -72,47 +83,22 @@ void MainWindow::setupMenuBar()
     fileMenu->addAction("&Quit", qApp, &QApplication::quit, QKeySequence::Quit);
 
     QMenu *runMenu = menuBar()->addMenu("&Run");
-    runMenu->addAction("&Assemble && Run", this, [this]{
-        try {
-            m_emulator->loadProgram(textFromEditor(), []{});
-            m_programLoaded = true;
-            if (m_memoryPanel)
-                m_memoryPanel->setMemory(&m_emulator->memory(), m_emulator->textBase());
-            m_emulator->run([]{});
-        } catch (const std::exception &e) {
-            m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
-        }
-        updatePanels();
-    }, QKeySequence("F5"));
-    runMenu->addAction("&Step", this, [this]{
-        try {
-            if (!m_programLoaded) {
-                m_emulator->loadProgram(textFromEditor(), []{});
-                m_programLoaded = true;
-                if (m_memoryPanel)
-                    m_memoryPanel->setMemory(&m_emulator->memory(), m_emulator->textBase());
-            }
-            else
-            {
-                m_emulator->step();
-            }
-
-        } catch (const std::exception &e) {
-            m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
-        }
-        updatePanels();
-    }, QKeySequence("F10"));
+    // Wire up to our new slots
+    runMenu->addAction("&Assemble && Run", this, &MainWindow::onRunClicked, QKeySequence("F5"));
+    runMenu->addAction("&Step", this, &MainWindow::onStepClicked, QKeySequence("F10"));
     runMenu->addAction("&Reset", this, [this]{
+        if (m_runTimer->isActive()) m_runTimer->stop();
+        if (m_runAction) m_runAction->setText("Run");
         m_emulator->reset();
         m_programLoaded = false;
         updatePanels();
     });
 
-    // Added: View Menu to toggle panels on and off
     QMenu *viewMenu = menuBar()->addMenu("&View");
     if (m_registerPanel) viewMenu->addAction(m_registerPanel->toggleViewAction());
     if (m_memoryPanel)   viewMenu->addAction(m_memoryPanel->toggleViewAction());
     if (m_console)       viewMenu->addAction(m_console->toggleViewAction());
+    if (m_pipelinePanel) viewMenu->addAction(m_pipelinePanel->toggleViewAction());
 }
 
 void MainWindow::setupToolBar()
@@ -120,40 +106,12 @@ void MainWindow::setupToolBar()
     QToolBar *tb = addToolBar("Main");
     tb->setMovable(false);
     
-    tb->addAction("Run",   this, [this]{
-        try {
-            if (!m_programLoaded || m_emulator->isFinished()) {                m_emulator->loadProgram(textFromEditor(), []{});
-                m_programLoaded = true;
-                if (m_memoryPanel)
-                    m_memoryPanel->setMemory(&m_emulator->memory(), m_emulator->textBase());
-            }
-            
-            m_emulator->run([]{});
-        } catch (const std::exception &e) {
-            m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
-        }
-        updatePanels();
-    });
-    
-    tb->addAction("Step",  this, [this]{
-        try {
-            if (!m_programLoaded || m_emulator->isFinished()) {
-                m_emulator->loadProgram(textFromEditor(), []{});
-                m_programLoaded = true;
-                if (m_memoryPanel)
-                    m_memoryPanel->setMemory(&m_emulator->memory(), m_emulator->textBase());
-            }
-            else
-            {
-                m_emulator->step();
-            }
-        } catch (const std::exception &e) {
-            m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
-        }
-        updatePanels();
-    });
-    
+    // Wire up the Run/Step/Reset actions to our slots
+    m_runAction = tb->addAction("Run", this, &MainWindow::onRunClicked);
+    tb->addAction("Step",  this, &MainWindow::onStepClicked);
     tb->addAction("Reset", this, [this]{
+        if (m_runTimer->isActive()) m_runTimer->stop();
+        m_runAction->setText("Run");
         m_emulator->reset();
         m_programLoaded = false;
         updatePanels();
@@ -161,13 +119,76 @@ void MainWindow::setupToolBar()
 
     tb->addSeparator();
 
-    // Add a checkable button to the toolbar to quickly toggle the Memory Panel
+    // --- Build the Speed Dropdown Slider ---
+    QToolButton *speedBtn = new QToolButton(this);
+    speedBtn->setText("Speed: Max");
+    speedBtn->setPopupMode(QToolButton::InstantPopup);
+    speedBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+
+    QMenu *speedMenu = new QMenu(this);
+    QWidgetAction *sliderAction = new QWidgetAction(speedMenu);
+    QWidget *sliderWidget = new QWidget(speedMenu);
+    
+    auto *vbox = new QVBoxLayout(sliderWidget);
+    vbox->setContentsMargins(15, 10, 15, 10);
+    
+    QLabel *speedLabel = new QLabel("Realtime (Max)", sliderWidget);
+    QSlider *slider = new QSlider(Qt::Horizontal, sliderWidget);
+    slider->setRange(1, 100);
+    slider->setValue(100);
+    slider->setMinimumWidth(150);
+
+    // Update speed logic when slider moves
+    connect(slider, &QSlider::valueChanged, this, [this, speedLabel, speedBtn](int val) {
+        m_cpuSpeed = val;
+        
+        QString unit = m_emulator->m_pipelineMode ? "Hz" : "IPS"; // Ticks vs Instructions
+        
+        if (val == 100) {
+            speedLabel->setText("Realtime (Max)");
+            speedBtn->setText("Speed: Max");
+        } else {
+            speedLabel->setText(QString("%1 %2").arg(val).arg(unit));
+            speedBtn->setText(QString("Speed: %1").arg(val));
+        }
+        
+        if (m_runTimer && m_runTimer->isActive()) {
+            m_runTimer->setInterval(1000 / m_cpuSpeed);
+        }
+    });
+
+    vbox->addWidget(speedLabel);
+    vbox->addWidget(slider);
+    sliderAction->setDefaultWidget(sliderWidget);
+    speedMenu->addAction(sliderAction);
+    speedBtn->setMenu(speedMenu);
+    
+    tb->addWidget(speedBtn);
+    // ----------------------------------------
+
+    tb->addSeparator();
+
     if (m_memoryPanel) {
         QAction* toggleMemory = m_memoryPanel->toggleViewAction();
         toggleMemory->setText("Toggle Memory");
         tb->addAction(toggleMemory);
     }
+
+    QAction *modeAction = new QAction("Mode: Standard", this);
+    modeAction->setCheckable(true);
+    connect(modeAction, &QAction::toggled, this, [this, modeAction](bool checked) {
+        m_emulator->m_pipelineMode = checked;
+        modeAction->setText(checked ? "Mode: Pipeline" : "Mode: Standard");
+        
+        // Reset the emulator when switching architectures to avoid corrupted state
+        m_emulator->reset();
+        m_programLoaded = false;
+        updatePanels();
+    });
+    tb->addAction(modeAction);
+    tb->addSeparator();
 }
+
 void MainWindow::setupStatusBar()
 {
     statusBar()->showMessage("Ready");
@@ -186,6 +207,14 @@ void MainWindow::setupDocks()
     // Console panel (bottom)
     m_console = new Console(this);
     addDockWidget(Qt::BottomDockWidgetArea, m_console);
+
+    // Pipeline panel (right, hidden by default)
+    m_pipelinePanel = new PipelinePanel(this);
+    addDockWidget(Qt::BottomDockWidgetArea, m_pipelinePanel);
+    if (m_console) {
+        tabifyDockWidget(m_console, m_pipelinePanel);
+    }
+    m_pipelinePanel->hide(); // start with pipeline collapsed/hidden
 }
 
 void MainWindow::updateConsole()
@@ -214,8 +243,15 @@ void MainWindow::updatePanels()
         else
             m_memoryPanel->refresh();
     }
-    
+
     auto *editor = currentEditor();
+    if (m_pipelinePanel && editor) {
+        // Split editor text into lines so PipelinePanel can look them up by line number
+        m_pipelinePanel->updatePipeline(m_emulator->m_pipelineHistory, 
+            m_emulator->m_globalCycle, 
+            m_sourceCache);
+    }
+    
     if (editor) {
         // Only highlight if loaded AND NOT completely finished
         if (m_programLoaded && !m_emulator->isFinished()) {
@@ -420,4 +456,81 @@ void MainWindow::onEditorModificationChanged(bool /*modified*/)
         title += "*";
     }
     m_tabWidget->setTabText(index, title);
+}
+
+void MainWindow::onRunClicked()
+{
+    // If it's already running slowly via timer, pause it.
+    if (m_runTimer->isActive()) {
+        m_runTimer->stop();
+        m_runAction->setText("Run");
+        updatePanels();
+        return;
+    }
+
+    try {
+        if (!m_programLoaded || m_emulator->isFinished()) {
+            m_emulator->loadProgram(textFromEditor(), []{});
+            m_sourceCache = currentEditor()->toPlainText().split('\n');
+            m_programLoaded = true;
+            if (m_memoryPanel)
+                m_memoryPanel->setMemory(&m_emulator->memory(), m_emulator->textBase());
+        }
+
+        if (m_cpuSpeed == 100) {
+            // MAX SPEED: Run blocking loop
+            m_emulator->run([]{});
+            updatePanels();
+        } else {
+            // SLOW SPEED: Start the tick timer and change button to "Pause"
+            m_runAction->setText("Pause");
+            m_runTimer->start(1000 / m_cpuSpeed);
+        }
+    } catch (const std::exception &e) {
+        m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
+        updatePanels();
+    }
+}
+
+void MainWindow::onStepClicked()
+{
+    // If timer is running, pause it first
+    if (m_runTimer->isActive()) {
+        m_runTimer->stop();
+        m_runAction->setText("Run");
+    }
+
+    try {
+        if (!m_programLoaded || m_emulator->isFinished()) {
+            m_emulator->loadProgram(textFromEditor(), []{});
+            m_sourceCache = currentEditor()->toPlainText().split('\n');
+            m_programLoaded = true;
+            if (m_memoryPanel)
+                m_memoryPanel->setMemory(&m_emulator->memory(), m_emulator->textBase());
+        } else {
+            m_emulator->step();
+        }
+    } catch (const std::exception &e) {
+        m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
+    }
+    updatePanels();
+}
+
+void MainWindow::onRunTimerTick()
+{
+    try {
+        m_emulator->step();
+        updatePanels();
+        
+        // Stop the timer if the program finished or hit a breakpoint
+        if (m_emulator->halted()) {
+            m_runTimer->stop();
+            m_runAction->setText("Run");
+        }
+    } catch (const std::exception &e) {
+        m_runTimer->stop();
+        m_runAction->setText("Run");
+        m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
+        updatePanels();
+    }
 }
