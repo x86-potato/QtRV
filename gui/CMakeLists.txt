@@ -11,6 +11,10 @@ add_executable(QTRv
     src/CodeEditor.h
     src/PipelinePanel.h
     src/PipelinePanel.cpp
+    src/AsmHighlighter.h
+    src/AsmHighlighter.cpp
+    src/DisplayWindow.h
+    src/DisplayWindow.cpp
 )
 
 set_target_properties(QTRv PROPERTIES

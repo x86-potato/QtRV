@@ -4,14 +4,17 @@
 #include "RegisterPanel.h"
 #include "CodeEditor.h"
 #include "PipelinePanel.h"
+#include "DisplayWindow.h"
 
 #include <stdexcept>
 #include <QApplication>
 #include <QTimer>
+#include <QEventLoop>
 #include <QToolButton>
 #include <QWidgetAction>
 #include <QSlider>
 #include <QVBoxLayout>
+#include <QFormLayout>
 #include <QMenuBar>
 #include <QToolBar>
 #include <QStatusBar>
@@ -27,6 +30,12 @@
 #include <QAction>
 #include <QStyleFactory>
 #include <QInputDialog>
+#include <QDir>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QLineEdit>
+#include <QSpinBox>
+#include <QPushButton>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -37,13 +46,46 @@ MainWindow::MainWindow(QWidget *parent)
     m_emulator = std::make_unique<Emulator>();
 
     m_emulator->setInputCallback([this](const std::string& prompt) -> std::string {
+        // A blocking read syscall stalls MipsCPU::tick() itself -- and thus
+        // the whole run()/step() call -- before control ever returns to the
+        // GUI event loop. Without this, anything written to memory (e.g. a
+        // bitmap fill) earlier in the same run is invisible for as long as
+        // the program is waiting on input, since nothing has told the
+        // panels/display to repaint yet.
+        updatePanels();
+
         bool ok = false;
         QString result = QInputDialog::getText(
             this,
             "Program Input",
             QString::fromStdString(prompt),
             QLineEdit::Normal, "", &ok);
-        return ok ? result.toStdString() : "";
+
+        if (!ok) {
+            // Cancelling the prompt stops the program, rather than silently
+            // feeding it an empty/zero value -- otherwise a retry-on-bad-
+            // input loop (e.g. "re-ask until the number is in range") would
+            // just re-prompt forever with no way to break out, since a
+            // blocking run() call can't be interrupted any other way.
+            m_emulator->halt();
+            return "";
+        }
+        return result.toStdString();
+    });
+
+    m_emulator->setSleepCallback([this](uint32_t ms) {
+        // Refresh first so a "reveal, pause, then hide" sequence (e.g. a
+        // memory game flipping two cards) actually shows the revealed state
+        // during the pause, instead of a stale view from before this
+        // syscall ran. Then pump a local event loop for the requested
+        // duration -- a plain blocking sleep here would also freeze Qt's
+        // event loop, so nothing could repaint until the "instant" pause
+        // was already over, defeating the point of waiting at all.
+        updatePanels();
+
+        QEventLoop loop;
+        QTimer::singleShot(static_cast<int>(ms), &loop, &QEventLoop::quit);
+        loop.exec();
     });
 
     //start execution timer for running the emulator in real-time
@@ -99,6 +141,18 @@ void MainWindow::setupMenuBar()
     if (m_memoryPanel)   viewMenu->addAction(m_memoryPanel->toggleViewAction());
     if (m_console)       viewMenu->addAction(m_console->toggleViewAction());
     if (m_pipelinePanel) viewMenu->addAction(m_pipelinePanel->toggleViewAction());
+
+    // Devices — structured as one submenu per device so more can be added later.
+    QMenu *devicesMenu = menuBar()->addMenu("&Devices");
+    QMenu *bitmapMenu = devicesMenu->addMenu("Bitmap Display");
+    bitmapMenu->addAction("Show Window", this, [this] {
+        if (!m_displayWindow) return;
+        m_displayWindow->refresh();
+        m_displayWindow->show();
+        m_displayWindow->raise();
+        m_displayWindow->activateWindow();
+    });
+    bitmapMenu->addAction("Configure...", this, &MainWindow::onConfigureDisplay);
 }
 
 void MainWindow::setupToolBar()
@@ -187,6 +241,57 @@ void MainWindow::setupToolBar()
     });
     tb->addAction(modeAction);
     tb->addSeparator();
+
+    // --- Single File / Whole Directory compile toggle ---
+    QAction *selectDirAction = new QAction("Select Folder…", this);
+    selectDirAction->setEnabled(false);
+
+    QAction *dirModeAction = new QAction("Compile: Single File", this);
+    dirModeAction->setCheckable(true);
+
+    connect(dirModeAction, &QAction::toggled, this, [this, dirModeAction, selectDirAction](bool checked) {
+        if (checked) {
+            QString dir = QFileDialog::getExistingDirectory(this, "Select Working Directory");
+            if (dir.isEmpty()) {
+                // User cancelled: don't enter directory mode.
+                dirModeAction->blockSignals(true);
+                dirModeAction->setChecked(false);
+                dirModeAction->blockSignals(false);
+                return;
+            }
+            m_workingDirectory = dir;
+            m_directoryMode = true;
+            dirModeAction->setText("Compile: Directory");
+            selectDirAction->setEnabled(true);
+        } else {
+            m_directoryMode = false;
+            dirModeAction->setText("Compile: Single File");
+            selectDirAction->setEnabled(false);
+        }
+
+        // Compiling context changed; force a reassemble on the next Run/Step.
+        m_runTimer->stop();
+        m_runAction->setText("Run");
+        m_emulator->reset();
+        m_programLoaded = false;
+        updatePanels();
+    });
+
+    connect(selectDirAction, &QAction::triggered, this, [this]() {
+        QString dir = QFileDialog::getExistingDirectory(this, "Select Working Directory", m_workingDirectory);
+        if (dir.isEmpty()) return;
+
+        m_workingDirectory = dir;
+        m_runTimer->stop();
+        m_runAction->setText("Run");
+        m_emulator->reset();
+        m_programLoaded = false;
+        updatePanels();
+    });
+
+    tb->addAction(dirModeAction);
+    tb->addAction(selectDirAction);
+    tb->addSeparator();
 }
 
 void MainWindow::setupStatusBar()
@@ -215,6 +320,76 @@ void MainWindow::setupDocks()
         tabifyDockWidget(m_console, m_pipelinePanel);
     }
     m_pipelinePanel->hide(); // start with pipeline collapsed/hidden
+
+    // Bitmap display device — its own top-level window, hidden until opened
+    // from the Devices menu.
+    m_displayWindow = new DisplayWindow(&m_emulator->memory(), this);
+    m_displayWindow->hide();
+}
+
+void MainWindow::onConfigureDisplay()
+{
+    if (!m_displayWindow) return;
+
+    static constexpr uint32_t DEFAULT_BASE   = 0x10040000u;
+    static constexpr int      DEFAULT_WIDTH  = 64;
+    static constexpr int      DEFAULT_HEIGHT = 32;
+
+    auto formatAddr = [](uint32_t addr) {
+        return QString("0x%1").arg(addr, 8, 16, QChar('0'));
+    };
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("Configure Bitmap Display");
+
+    auto *addressEdit = new QLineEdit(formatAddr(m_displayWindow->baseAddress()), &dialog);
+
+    auto *widthSpin = new QSpinBox(&dialog);
+    widthSpin->setRange(1, 2048);
+    widthSpin->setValue(m_displayWindow->widthPixels());
+
+    auto *heightSpin = new QSpinBox(&dialog);
+    heightSpin->setRange(1, 2048);
+    heightSpin->setValue(m_displayWindow->heightPixels());
+
+    auto *form = new QFormLayout();
+    form->addRow("Base Address:", addressEdit);
+    form->addRow("Width (px):", widthSpin);
+    form->addRow("Height (px):", heightSpin);
+
+    auto *resetBtn = new QPushButton("Reset to Default", &dialog);
+    connect(resetBtn, &QPushButton::clicked, &dialog, [=] {
+        addressEdit->setText(formatAddr(DEFAULT_BASE));
+        widthSpin->setValue(DEFAULT_WIDTH);
+        heightSpin->setValue(DEFAULT_HEIGHT);
+    });
+    form->addRow(resetBtn);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+
+    auto *vbox = new QVBoxLayout(&dialog);
+    vbox->addLayout(form);
+    vbox->addWidget(buttons);
+
+    uint32_t parsedAddr = m_displayWindow->baseAddress();
+
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]() {
+        bool ok = false;
+        // base 0 auto-detects a "0x" prefix, same convention used elsewhere (e.g. immediates)
+        uint32_t addr = static_cast<uint32_t>(addressEdit->text().trimmed().toULong(&ok, 0));
+        if (!ok) {
+            QMessageBox::warning(&dialog, "Invalid Address",
+                "Base address must be a decimal or 0x-prefixed hex integer.");
+            return;
+        }
+        parsedAddr = addr;
+        dialog.accept();
+    });
+
+    if (dialog.exec() == QDialog::Accepted) {
+        m_displayWindow->configure(parsedAddr, widthSpin->value(), heightSpin->value());
+    }
 }
 
 void MainWindow::updateConsole()
@@ -244,6 +419,10 @@ void MainWindow::updatePanels()
             m_memoryPanel->refresh();
     }
 
+    // Bitmap display — only bother polling memory while the window is actually visible
+    if (m_displayWindow && m_displayWindow->isVisible())
+        m_displayWindow->refresh();
+
     auto *editor = currentEditor();
     if (m_pipelinePanel && editor) {
         // Split editor text into lines so PipelinePanel can look them up by line number
@@ -252,20 +431,33 @@ void MainWindow::updatePanels()
             m_sourceCache);
     }
     
-    if (editor) {
-        // Only highlight if loaded AND NOT completely finished
-        if (m_programLoaded && !m_emulator->isFinished()) {
-            uint32_t currentPC = m_emulator->pc();
-            
-            if (m_emulator->m_PCtoLineMap.find(currentPC) != m_emulator->m_PCtoLineMap.end()) {
-                uint32_t zeroIndexedLine = m_emulator->m_PCtoLineMap[currentPC] - 1; 
-                editor->setExecutionLine(zeroIndexedLine);
-            } else {
-                editor->setExecutionLine(-1);
-            }
-        } else {
-            // Program is reset or finished, clear the green highlight
-            editor->setExecutionLine(-1);
+    // Clear the execution highlight on every open tab first, then (if
+    // applicable) re-apply it to whichever one is currently executing. This
+    // ensures a Reset/finish always clears every tab, not just the active
+    // one, and that stepping across files never leaves a stale highlight
+    // behind in the file execution just left.
+    for (int i = 0; i < m_tabWidget->count(); ++i) {
+        if (auto *ed = qobject_cast<CodeEditor*>(m_tabWidget->widget(i)))
+            ed->setExecutionLine(-1);
+    }
+
+    // Only highlight if loaded AND NOT completely finished
+    if (m_programLoaded && !m_emulator->isFinished()) {
+        uint32_t currentPC = m_emulator->pc();
+        auto it = m_emulator->m_PCtoLineMap.find(currentPC);
+
+        if (it != m_emulator->m_PCtoLineMap.end()) {
+            uint32_t blobLine = it->second;
+
+            // Translate the blob-relative line back to which file it came
+            // from, so execution can be shown in the correct tab even when
+            // multiple files were compiled together.
+            QString filePath = QString::fromStdString(m_emulator->fileForBlobLine(blobLine));
+            uint32_t localLine = m_emulator->localLineForBlobLine(blobLine);
+
+            CodeEditor *target = filePath.isEmpty() ? editor : openOrFocusFile(filePath);
+            if (target)
+                target->setExecutionLine(static_cast<int>(localLine) - 1);
         }
     }
 
@@ -280,19 +472,6 @@ void MainWindow::updatePanels()
         statusBar()->showMessage("Running");
     }
 }
-
-const std::string &MainWindow::textFromEditor() const
-{
-    static std::string text; // avoid returning reference to temporary
-    CodeEditor *editor = currentEditor();
-    if (editor) {
-        text = editor->toPlainText().toStdString();
-        return text;
-    }
-    static std::string empty;
-    return empty;
-}
-
 
 CodeEditor* MainWindow::currentEditor() const
 {
@@ -333,16 +512,107 @@ CodeEditor* MainWindow::createEditorTab(const QString &title, const QString &fil
     // Attach our flat button to the right side of the tab
     m_tabWidget->tabBar()->setTabButton(index, QTabBar::RightSide, closeBtn);
 
-    // Reset emulator state when switching/creating files
-    m_programLoaded = false;
-    updatePanels();
-    
     return editor;
+}
+
+CodeEditor* MainWindow::findEditorForPath(const QString &key) const
+{
+    for (int i = 0; i < m_tabWidget->count(); ++i) {
+        auto *ed = qobject_cast<CodeEditor*>(m_tabWidget->widget(i));
+        if (ed && ed->breakpointKey() == key)
+            return ed;
+    }
+    return nullptr;
+}
+
+CodeEditor* MainWindow::openOrFocusFile(const QString &absPath)
+{
+    CodeEditor *existing = findEditorForPath(absPath);
+    if (existing) {
+        m_tabWidget->setCurrentWidget(existing);
+        return existing;
+    }
+
+    // Only real on-disk paths can be opened fresh; a synthetic "untitled://"
+    // key with no matching tab means that scratch buffer was closed.
+    if (!absPath.startsWith("untitled://")) {
+        QFile file(absPath);
+        if (file.open(QFile::ReadOnly | QFile::Text)) {
+            QTextStream in(&file);
+            QString content = in.readAll();
+
+            QFileInfo fileInfo(absPath);
+            CodeEditor *editor = createEditorTab(fileInfo.fileName(), absPath);
+            editor->setPlainText(content);
+            editor->document()->setModified(false);
+            return editor;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<SourceUnit> MainWindow::gatherCompileUnits()
+{
+    std::vector<SourceUnit> units;
+
+    if (!m_directoryMode) {
+        CodeEditor *editor = currentEditor();
+        if (editor) {
+            SourceUnit u;
+            u.path = editor->breakpointKey().toStdString();
+            u.text = editor->toPlainText().toStdString();
+            units.push_back(std::move(u));
+        }
+        return units;
+    }
+
+    QDir dir(m_workingDirectory);
+    QStringList fileNames = dir.entryList(QStringList() << "*.asm" << "*.s", QDir::Files, QDir::Name);
+
+    for (const QString &fileName : fileNames) {
+        QString absPath = QFileInfo(dir, fileName).absoluteFilePath();
+
+        SourceUnit u;
+        u.path = absPath.toStdString();
+
+        CodeEditor *open = findEditorForPath(absPath);
+        if (open) {
+            // Use the live buffer so unsaved edits are included.
+            u.text = open->toPlainText().toStdString();
+        } else {
+            QFile file(absPath);
+            if (!file.open(QFile::ReadOnly | QFile::Text))
+                throw std::runtime_error("Cannot read file: " + absPath.toStdString());
+            QTextStream in(&file);
+            u.text = in.readAll().toStdString();
+        }
+        units.push_back(std::move(u));
+    }
+
+    if (units.empty())
+        throw std::runtime_error("No .asm/.s files found in " + m_workingDirectory.toStdString());
+
+    return units;
+}
+
+bool MainWindow::loadCurrentProgram()
+{
+    auto units = gatherCompileUnits();
+    m_emulator->loadProgramMulti(units, []{});
+    m_sourceCache = QString::fromStdString(m_emulator->m_sourceBlob).split('\n');
+    m_programLoaded = true;
+    if (m_memoryPanel)
+        m_memoryPanel->setMemory(&m_emulator->memory(), m_emulator->textBase());
+    return true;
 }
 
 void MainWindow::onFileNew()
 {
     createEditorTab("Untitled");
+
+    // Reset emulator state when switching/creating files
+    m_programLoaded = false;
+    updatePanels();
 }
 
 void MainWindow::onFileOpen()
@@ -372,6 +642,10 @@ void MainWindow::onFileOpen()
     CodeEditor *editor = createEditorTab(fileInfo.fileName(), fileName);
     editor->setPlainText(content);
     editor->document()->setModified(false);
+
+    // Reset emulator state when switching/creating files
+    m_programLoaded = false;
+    updatePanels();
 }
 
 bool MainWindow::onFileSave()
@@ -470,11 +744,7 @@ void MainWindow::onRunClicked()
 
     try {
         if (!m_programLoaded || m_emulator->isFinished()) {
-            m_emulator->loadProgram(textFromEditor(), []{});
-            m_sourceCache = currentEditor()->toPlainText().split('\n');
-            m_programLoaded = true;
-            if (m_memoryPanel)
-                m_memoryPanel->setMemory(&m_emulator->memory(), m_emulator->textBase());
+            loadCurrentProgram();
         }
 
         if (m_cpuSpeed == 100) {
@@ -487,7 +757,7 @@ void MainWindow::onRunClicked()
             m_runTimer->start(1000 / m_cpuSpeed);
         }
     } catch (const std::exception &e) {
-        m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
+        m_emulator->m_buffer.m_data += "\n[Error] " + m_emulator->annotateFileLines(e.what());
         updatePanels();
     }
 }
@@ -502,16 +772,12 @@ void MainWindow::onStepClicked()
 
     try {
         if (!m_programLoaded || m_emulator->isFinished()) {
-            m_emulator->loadProgram(textFromEditor(), []{});
-            m_sourceCache = currentEditor()->toPlainText().split('\n');
-            m_programLoaded = true;
-            if (m_memoryPanel)
-                m_memoryPanel->setMemory(&m_emulator->memory(), m_emulator->textBase());
+            loadCurrentProgram();
         } else {
             m_emulator->step();
         }
     } catch (const std::exception &e) {
-        m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
+        m_emulator->m_buffer.m_data += "\n[Error] " + m_emulator->annotateFileLines(e.what());
     }
     updatePanels();
 }
@@ -530,7 +796,7 @@ void MainWindow::onRunTimerTick()
     } catch (const std::exception &e) {
         m_runTimer->stop();
         m_runAction->setText("Run");
-        m_emulator->m_buffer.m_data += std::string("\n[Error] ") + e.what();
+        m_emulator->m_buffer.m_data += "\n[Error] " + m_emulator->annotateFileLines(e.what());
         updatePanels();
     }
 }

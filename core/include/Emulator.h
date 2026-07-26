@@ -4,6 +4,8 @@
 #include <vector>
 #include <array>
 #include <functional>
+#include <algorithm>
+#include <regex>
 
 #include "Lexer.h"
 #include "Assembler.h"  
@@ -15,8 +17,27 @@
 #include "Loader.h"
 #include "InstructionState.h"
 
-using PCtoLine = std::map<uint32_t, uint32_t>; 
-using LinetoPC = std::map<uint32_t, uint32_t>; 
+using PCtoLine = std::map<uint32_t, uint32_t>;
+using LinetoPC = std::map<uint32_t, uint32_t>;
+
+// One file's worth of source text to be concatenated into the assembled blob.
+// `path` is an absolute file path for on-disk files, or a synthetic key
+// (e.g. "untitled://...") for the unsaved quick-start buffer.
+struct SourceUnit
+{
+    std::string path;
+    std::string text;
+};
+
+// Records where one file's lines landed in the concatenated blob, so
+// blob-relative line numbers (used everywhere internally) can be translated
+// back to a (file, local line) pair for breakpoints and execution highlighting.
+struct FileSpan
+{
+    std::string path;
+    uint32_t    startLine = 0; // first blob line (1-indexed) belonging to this file
+    uint32_t    lineCount = 0;
+};
 
 class Emulator
 {
@@ -33,7 +54,25 @@ public:
         auto IR = m_parser.parse(tokens);
         callback();
 
-        auto binary = m_assembler.assemble(IR);
+        // m_fileTable is normally populated by loadProgramMulti() just before
+        // it calls this; a direct/standalone loadProgram() call (no file
+        // table set up yet) falls back to treating the whole source as one
+        // file, so label scoping degrades to "everything is global", same
+        // as before file scoping existed.
+        std::vector<AssemblerFileSpan> fileSpans;
+        if (!m_fileTable.empty())
+        {
+            fileSpans.reserve(m_fileTable.size());
+            for (const auto& span : m_fileTable)
+                fileSpans.push_back({span.startLine, span.lineCount});
+        }
+        else
+        {
+            uint32_t lineCount = static_cast<uint32_t>(std::count(source.begin(), source.end(), '\n')) + 1;
+            fileSpans.push_back({1u, lineCount});
+        }
+
+        auto binary = m_assembler.assemble(IR, fileSpans);
         m_PCtoLineMap = std::move(m_assembler.PCtoLine);
         m_lineToPCMap = std::move(m_assembler.LinetoPC);
 
@@ -43,10 +82,120 @@ public:
         m_cpu.setMemory(&m_memory);
         m_cpu.setOutput(&m_buffer);
         m_cpu.setInputCallback(m_inputCallback);
+        m_cpu.setSleepCallback(m_sleepCallback);
 
         InitBreakpoints();
 
         return true;
+    }
+
+    // Concatenates every unit's source text into one blob ("header style" —
+    // no real linking) and records a FileSpan per unit so blob line numbers
+    // can be translated back to (file, local line) for breakpoints and the
+    // execution-highlight cursor. Single-file callers just pass one unit.
+    template <typename Callback>
+    bool loadProgramMulti(const std::vector<SourceUnit>& units, Callback callback)
+    {
+        std::string blob;
+        m_fileTable.clear();
+
+        uint32_t lineCursor = 0; // lines emitted so far (0-indexed count == next start line - 1)
+        for (const auto& unit : units)
+        {
+            std::string text = unit.text;
+            if (!text.empty() && text.back() != '\n')
+                text += '\n';
+
+            uint32_t lineCount = static_cast<uint32_t>(std::count(text.begin(), text.end(), '\n'));
+
+            FileSpan span;
+            span.path      = unit.path;
+            span.startLine = lineCursor + 1; // 1-indexed
+            span.lineCount = lineCount;
+            m_fileTable.push_back(span);
+
+            blob += text;
+            lineCursor += lineCount;
+        }
+
+        m_sourceBlob = blob;
+        return loadProgram(blob, callback);
+    }
+
+    // Translates a blob-relative (1-indexed) line number to the file path it
+    // belongs to. Returns an empty string if it falls outside every span
+    // (e.g. the trailing EOF line).
+    std::string fileForBlobLine(uint32_t blobLine) const
+    {
+        for (const auto& span : m_fileTable) {
+            if (blobLine >= span.startLine && blobLine < span.startLine + span.lineCount)
+                return span.path;
+        }
+        return "";
+    }
+
+    // Translates a blob-relative (1-indexed) line number to a 1-indexed line
+    // local to whichever file owns it.
+    uint32_t localLineForBlobLine(uint32_t blobLine) const
+    {
+        for (const auto& span : m_fileTable) {
+            if (blobLine >= span.startLine && blobLine < span.startLine + span.lineCount)
+                return blobLine - span.startLine + 1;
+        }
+        return 0;
+    }
+
+    // Inverse of the above: given a file path and a 1-indexed local line,
+    // returns the corresponding blob-relative line, or 0 if that file isn't
+    // part of the currently loaded program.
+    uint32_t blobLineForFileLocal(const std::string& path, uint32_t localLine) const
+    {
+        for (const auto& span : m_fileTable) {
+            if (span.path == path)
+                return span.startLine + localLine - 1;
+        }
+        return 0;
+    }
+
+    // Lexer/Parser/Assembler exceptions report blob-relative line numbers
+    // ("... at line 42"), which are meaningless once multiple files are
+    // compiled together. This rewrites every "line N" in a message to
+    // "line <local line> of <file>" so errors read naturally regardless of
+    // how many files were involved.
+    std::string annotateFileLines(const std::string &message) const
+    {
+        static const std::regex lineRef(R"(line (\d+))");
+
+        std::string result;
+        result.reserve(message.size());
+        size_t lastEnd = 0;
+
+        for (auto it = std::sregex_iterator(message.begin(), message.end(), lineRef);
+             it != std::sregex_iterator(); ++it)
+        {
+            const std::smatch &m = *it;
+            size_t matchStart = static_cast<size_t>(m.position(0));
+            result.append(message, lastEnd, matchStart - lastEnd);
+
+            uint32_t blobLine = static_cast<uint32_t>(std::stoul(m[1].str()));
+            std::string filePath = fileForBlobLine(blobLine);
+            uint32_t localLine = localLineForBlobLine(blobLine);
+
+            if (filePath.empty() || localLine == 0)
+            {
+                result.append(m.str(0)); // couldn't resolve; leave the original text as-is
+            }
+            else
+            {
+                bool isUnsaved = filePath.rfind("untitled://", 0) == 0;
+                std::string label = isUnsaved ? "Untitled" : filePath.substr(filePath.find_last_of("/\\") + 1);
+                result += "line " + std::to_string(localLine) + " of " + label;
+            }
+
+            lastEnd = matchStart + static_cast<size_t>(m.length(0));
+        }
+        result.append(message, lastEnd, std::string::npos);
+        return result;
     }
 
     template <typename Callback>
@@ -178,6 +327,11 @@ public:
         m_inputCallback = std::move(cb);
     }
 
+    void setSleepCallback(std::function<void(uint32_t)> cb)
+    {
+        m_sleepCallback = std::move(cb);
+    }
+
     void step() { 
         if (m_cpu.halted() && !m_cpu.m_breakpointHit) return; // Ignore if program finished naturally
 
@@ -197,16 +351,48 @@ public:
         updatePipelineStates();
     }
 
-    void setBreakpoint(uint32_t pc, bool enabled);
+    // fileKey: absolute path (or synthetic key for an unsaved buffer);
+    // localLine: 0-indexed, matching CodeEditor's block numbers.
+    void setBreakpoint(const std::string& fileKey, uint32_t localLine, bool enabled)
+    {
+        if (enabled) {
+            m_breakpointsByFile[fileKey].insert(localLine);
+        } else {
+            auto it = m_breakpointsByFile.find(fileKey);
+            if (it != m_breakpointsByFile.end())
+                it->second.erase(localLine);
+        }
+
+        // If this file is part of the currently loaded program, mirror the
+        // change onto the CPU immediately (matches the old behavior).
+        uint32_t blobLine = blobLineForFileLocal(fileKey, localLine + 1);
+        if (blobLine != 0 && m_lineToPCMap.find(blobLine) != m_lineToPCMap.end())
+            m_cpu.setBreakpoint(m_lineToPCMap[blobLine], enabled);
+    }
+
+    // Moves a file's breakpoint bucket to a new key, e.g. when an unsaved
+    // buffer is saved to disk for the first time and its key changes from a
+    // synthetic id to a real absolute path.
+    void renameBreakpointFile(const std::string& oldKey, const std::string& newKey)
+    {
+        auto it = m_breakpointsByFile.find(oldKey);
+        if (it == m_breakpointsByFile.end()) return;
+        m_breakpointsByFile[newKey] = std::move(it->second);
+        m_breakpointsByFile.erase(it);
+    }
 
     void InitBreakpoints()
     {
-        for (const auto& line : m_breakpoint_lines)
+        for (const auto& span : m_fileTable)
         {
-            if (m_lineToPCMap.find(line+1) != m_lineToPCMap.end())
+            auto it = m_breakpointsByFile.find(span.path);
+            if (it == m_breakpointsByFile.end()) continue;
+
+            for (uint32_t localLine : it->second)
             {
-                uint32_t pc = m_lineToPCMap[line+1];
-                m_cpu.setBreakpoint(pc, true);
+                uint32_t blobLine = span.startLine + localLine; // localLine is 0-indexed
+                if (m_lineToPCMap.find(blobLine) != m_lineToPCMap.end())
+                    m_cpu.setBreakpoint(m_lineToPCMap[blobLine], true);
             }
         }
     }
@@ -230,11 +416,14 @@ public:
     uint32_t textBase() const { return m_cpu.text; }
 
     Buffer m_buffer;
-    PCtoLine    m_PCtoLineMap; 
+    PCtoLine    m_PCtoLineMap;
     LinetoPC    m_lineToPCMap;
-    std::unordered_set<uint32_t> m_breakpoint_lines; 
+    std::map<std::string, std::unordered_set<uint32_t>> m_breakpointsByFile;
     std::vector<PipelineRow> m_pipelineStates; // Store the pipeline states for visualization
     bool m_pipelineMode = false;
+
+    std::string          m_sourceBlob; // concatenated source text for the currently loaded program
+    std::vector<FileSpan> m_fileTable; // per-file line spans within m_sourceBlob
 
 private:
     MipsCPU     m_cpu;
@@ -244,6 +433,7 @@ private:
     Assembler   m_assembler;
 
     std::function<std::string(const std::string&)> m_inputCallback;
+    std::function<void(uint32_t)> m_sleepCallback;
     std::vector<std::string> m_errors;
 
 };

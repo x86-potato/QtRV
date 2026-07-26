@@ -3,6 +3,7 @@
 #include <QPlainTextEdit>
 #include <QWidget>
 #include <QSet>
+#include <QFileInfo>
 #include "Emulator.h"
 
 
@@ -14,8 +15,25 @@ public:
     explicit CodeEditor(QWidget *parent = nullptr, Emulator *emulator = nullptr);
 
     QString filePath() const { return m_filePath; }
-    void setFilePath(const QString &path) { m_filePath = path; }
-    
+
+    // Identifies this editor's breakpoints to the Emulator: the absolute file
+    // path once saved, or a stable synthetic key for an unsaved buffer.
+    QString breakpointKey() const { return m_bpKey; }
+
+    // Updates the file path and, if it changes the breakpoint identity (e.g.
+    // an unsaved buffer being saved for the first time), moves this editor's
+    // breakpoints in the Emulator over to the new key.
+    void setFilePath(const QString &path)
+    {
+        m_filePath = path;
+        QString newKey = path.isEmpty() ? m_bpKey : QFileInfo(path).absoluteFilePath();
+        if (newKey != m_bpKey) {
+            if (m_emulator)
+                m_emulator->renameBreakpointFile(m_bpKey.toStdString(), newKey.toStdString());
+            m_bpKey = newKey;
+        }
+    }
+
     void setExecutionLine(int blockNumber);
     void lineNumberAreaPaintEvent(QPaintEvent *event);
     void lineNumberAreaMousePressEvent(QMouseEvent *event);
@@ -37,6 +55,7 @@ private:
     QSet<int> m_breakpoints; // Stores 0-indexed line numbers where breakpoints are set
     Emulator *m_emulator = nullptr; // Pointer to the emulator for breakpoint management
     QString m_filePath;
+    QString m_bpKey; // breakpoint identity: absolute path once saved, else a synthetic per-instance key
 };
 
 // Companion widget strictly for drawing the line numbers and catching clicks

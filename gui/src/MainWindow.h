@@ -12,6 +12,7 @@ class Console;
 class MemoryPanel;
 class RegisterPanel;
 class PipelinePanel;
+class DisplayWindow;
 
 class MainWindow : public QMainWindow
 {
@@ -39,6 +40,7 @@ private:
     void setupStatusBar();
     void setupDocks();
     void setupCentralWidget();
+    void onConfigureDisplay(); // opens the "Configure Bitmap Display" dialog
 
     QTimer *m_runTimer = nullptr;
     QAction *m_runAction = nullptr;
@@ -56,12 +58,19 @@ private:
 
     QTabWidget *m_tabWidget = nullptr;
 
-    const std::string &textFromEditor() const;
+    // Multi-file / whole-directory compilation
+    bool m_directoryMode = false;
+    QString m_workingDirectory;
+    std::vector<SourceUnit> gatherCompileUnits();
+    CodeEditor* findEditorForPath(const QString &absPath) const;
+    CodeEditor* openOrFocusFile(const QString &absPath); // opens from disk if no tab has it yet
+    bool loadCurrentProgram(); // gathers compile units and loads them into the emulator; false on assemble error
 
     std::unique_ptr<Emulator> m_emulator;
     Console       *m_console       = nullptr;
     MemoryPanel   *m_memoryPanel   = nullptr;
     RegisterPanel *m_registerPanel = nullptr;
     PipelinePanel *m_pipelinePanel = nullptr;
+    DisplayWindow *m_displayWindow = nullptr;
     bool           m_programLoaded = false;
 };

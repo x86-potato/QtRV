@@ -70,7 +70,25 @@ static void parseLabel(Cursor& c, Program& program)
     program.push_back(lbl);
 }
 
-// DIRECTIVE [args...] NEWLINE
+// True if, skipping over any blank/comment-only lines, the next real token
+// is bare data (NUMBER/STRING) rather than a new label/directive/instruction
+// or EOF. Used to let a directive's argument list continue onto following
+// lines without repeating the directive keyword, e.g.:
+//   offsets: .word
+//       1, 2, 3,
+//       4, 5, 6
+static bool nextIsBareValue(const Cursor& c)
+{
+    size_t p = c.pos;
+    while (p < c.tokens.size() &&
+           (c.tokens[p].type == TokenType::NEWLINE || c.tokens[p].type == TokenType::COMMENT))
+        ++p;
+    if (p >= c.tokens.size()) return false;
+    TokenType t = c.tokens[p].type;
+    return t == TokenType::NUMBER || t == TokenType::STRING;
+}
+
+// DIRECTIVE [args...] NEWLINE [more args on following lines...]
 static void parseDirective(Cursor& c, Program& program)
 {
     Directive dir;
@@ -78,12 +96,24 @@ static void parseDirective(Cursor& c, Program& program)
     dir.line = c.current().line;
     c.advance(); // consume DIRECTIVE token
 
-    while (!c.isEndOfLine()) {
-        if (c.match(TokenType::COMMA)) continue; // skip separators
-        dir.args.push_back(c.advance());
+    while (true) {
+        while (!c.isEndOfLine()) {
+            if (c.match(TokenType::COMMA)) continue; // skip separators
+            dir.args.push_back(c.advance());
+        }
+
+        // End of a physical line: skip past a trailing comment (and its
+        // newline), or a bare newline, or stop entirely at EOF.
+        if (c.current().type == TokenType::COMMENT)
+            c.skipToNextLine();
+        else if (c.current().type == TokenType::NEWLINE)
+            c.advance();
+        else
+            break; // EOF
+
+        if (!nextIsBareValue(c)) break; // next line starts a new statement
     }
 
-    skipLineEnd(c);
     program.push_back(dir);
 }
 
@@ -104,6 +134,20 @@ static void parseInstruction(Cursor& c, Program& program)
         {
             instr.operands.push_back(c.advance()); // NUMBER  (offset)
             c.advance();                            // discard LPAREN
+            instr.operands.push_back(c.advance()); // REGISTER (base)
+            c.expect(TokenType::RPAREN);            // consume and validate RPAREN
+            continue;
+        }
+
+        // Bare "( REGISTER )" with no leading offset -- implies offset 0,
+        // e.g. "la $rd, ($rs)" (a common shorthand for copying a register).
+        // Synthesize the implied NUMBER("0") so it flattens the same way as
+        // the explicit-offset form above.
+        if (c.current().type == TokenType::LPAREN)
+        {
+            int line = c.current().line;
+            c.advance(); // discard LPAREN
+            instr.operands.emplace_back(TokenType::NUMBER, "0", line);
             instr.operands.push_back(c.advance()); // REGISTER (base)
             c.expect(TokenType::RPAREN);            // consume and validate RPAREN
             continue;

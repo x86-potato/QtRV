@@ -29,6 +29,7 @@ const inline BinaryMap TokenToBinary(const std::string &token)
         {"bne",   {6, 0x05}},
         {"blez",  {6, 0x06}},
         {"bgtz",  {6, 0x07}},
+        {"bltz",  {6, 0x01}}, // REGIMM opcode; rt field fixed at 0 for bltz
         // Arithmetic / logic
         {"addi",  {6, 0x08}},
         {"addiu", {6, 0x09}},
@@ -113,6 +114,23 @@ struct InstrDesc
     uint8_t   funct     =  0;  // function code (R-type)
 };
 
+// Coarse classification of a mnemonic, used by the GUI syntax highlighter
+// so instruction categories don't need to be duplicated outside the assembler.
+enum class InstrClass { R_TYPE, I_TYPE, J_TYPE, PSEUDO, UNKNOWN };
+
+InstrClass classifyInstruction(const std::string &mnemonic);
+
+// A file's line range within the (possibly multi-file) concatenated source.
+// Used to scope non-".globl" labels to the file that defined them, and to
+// resolve label references against their own file's local labels first.
+// An empty span list (the default) means "treat the whole input as one
+// file" -- i.e. every label behaves as it did before file scoping existed.
+struct AssemblerFileSpan
+{
+    uint32_t startLine = 1; // first line (1-indexed) belonging to this file
+    uint32_t lineCount = 0; // number of lines belonging to this file
+};
+
 class Assembler
 {
 public:
@@ -121,5 +139,6 @@ public:
 
     Assembler() = default;
 
-    Binary assemble(const std::vector<IR> &IR_INPUT);
+    Binary assemble(const std::vector<IR> &IR_INPUT,
+                     const std::vector<AssemblerFileSpan> &fileSpans = {});
 };

@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <unordered_set>
+#include <random>
 
 #include "Memory.h"
 #include "Buffer.h"
@@ -31,6 +32,15 @@ public:
         m_inputCallback = std::move(cb);
     }
 
+    // Backs syscall 32 (Sleep). Left to the GUI layer so it can refresh the
+    // display first (so a "reveal, pause, then hide" sequence is actually
+    // visible) and keep the UI responsive while waiting, rather than the
+    // core blocking the whole app for the duration.
+    void setSleepCallback(std::function<void(uint32_t)> cb)
+    {
+        m_sleepCallback = std::move(cb);
+    }
+
     bool halted() const { return m_halted; }
 
     void setBreakpoint(uint32_t pc, bool enabled)
@@ -48,7 +58,9 @@ public:
     Memory*  m_mem    = nullptr;
     Buffer*  m_out    = nullptr;
     std::function<std::string(const std::string&)> m_inputCallback;
+    std::function<void(uint32_t)> m_sleepCallback;
     uint32_t m_instr  = 0;
+    std::mt19937 m_rng { std::random_device{}() }; // backs syscalls 40/41/42 (seed/random int)
 
     // ── Decoded instruction fields ───────────────────────────────────────────
     uint32_t m_opcode = 0;

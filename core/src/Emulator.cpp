@@ -57,23 +57,14 @@ void Emulator::debugIR(const Program& program)
 }
 
 
-void Emulator::setBreakpoint(uint32_t line_number, bool enabled)
+void Emulator::halt()
 {
-    if (enabled)
-    {
-        m_breakpoint_lines.insert(line_number);
-    }
-    else
-    {
-        m_breakpoint_lines.erase(line_number);
-    }
-
-    //if program is loaded, set the breakpoint in the CPU
-    if (m_lineToPCMap.find(line_number + 1) != m_lineToPCMap.end())
-    {
-        uint32_t pc = m_lineToPCMap[line_number + 1];
-        m_cpu.setBreakpoint(pc, enabled);
-    }
+    // Marks the CPU halted so the run()/step() loop currently in progress
+    // stops at the next opportunity. Safe to call from inside a syscall
+    // callback (e.g. an input dialog being cancelled): the in-flight
+    // instruction finishes normally, then run()'s while(!halted()) check
+    // exits on its next iteration.
+    m_cpu.m_halted = true;
 }
 
 void Emulator::reset()

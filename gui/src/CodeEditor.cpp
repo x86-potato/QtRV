@@ -1,4 +1,5 @@
 #include "CodeEditor.h"
+#include "AsmHighlighter.h"
 
 #include <QPainter>
 #include <QMouseEvent>
@@ -81,6 +82,11 @@ void CodeEditor::updateHighlights() {
 
 CodeEditor::CodeEditor(QWidget *parent, Emulator *emulator) : QPlainTextEdit(parent), m_emulator(emulator) {
     lineNumberArea = new LineNumberArea(this);
+    new AsmHighlighter(document());
+
+    // Stable per-instance key so breakpoints on an unsaved buffer still work;
+    // setFilePath() will migrate this to the real absolute path once saved.
+    m_bpKey = QString("untitled://%1").arg(reinterpret_cast<quintptr>(this));
 
     // Connect signals to keep the margin width and line highlight updated
     connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
@@ -184,10 +190,10 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event) {
 void CodeEditor::toggleBreakpoint(int blockNumber) {
     if (m_breakpoints.contains(blockNumber)) {
         m_breakpoints.remove(blockNumber);
-        m_emulator->setBreakpoint(blockNumber, false);
+        m_emulator->setBreakpoint(m_bpKey.toStdString(), blockNumber, false);
     } else {
         m_breakpoints.insert(blockNumber);
-        m_emulator->setBreakpoint(blockNumber, true);
+        m_emulator->setBreakpoint(m_bpKey.toStdString(), blockNumber, true);
     }
     lineNumberArea->update(); // Request a redraw to show/hide the red dot
     

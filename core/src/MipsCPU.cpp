@@ -1,5 +1,6 @@
 #include "MipsCPU.h"
 #include <string>
+#include <chrono>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static inline int32_t   signed32(uint32_t x)   { return static_cast<int32_t>(x); }
@@ -110,6 +111,27 @@ void MipsCPU::execute()
             hi = static_cast<uint32_t>(prod >> 32);
             lo = static_cast<uint32_t>(prod & 0xFFFFFFFF);
         } break;
+        case 0x19: { // multu
+            uint64_t prod = static_cast<uint64_t>(r[m_rs]) * static_cast<uint64_t>(r[m_rt]);
+            hi = static_cast<uint32_t>(prod >> 32);
+            lo = static_cast<uint32_t>(prod & 0xFFFFFFFF);
+        } break;
+        case 0x1A: { // div: lo = quotient, hi = remainder (signed)
+            if (r[m_rt] != 0) {
+                lo = static_cast<uint32_t>(signed32(r[m_rs]) / signed32(r[m_rt]));
+                hi = static_cast<uint32_t>(signed32(r[m_rs]) % signed32(r[m_rt]));
+            } else {
+                lo = 0; hi = 0; // division by zero: classic MIPS leaves this undefined
+            }
+        } break;
+        case 0x1B: { // divu
+            if (r[m_rt] != 0) {
+                lo = r[m_rs] / r[m_rt];
+                hi = r[m_rs] % r[m_rt];
+            } else {
+                lo = 0; hi = 0;
+            }
+        } break;
         case 0x20: // add
         case 0x21: wr(m_rd, r[m_rs] + r[m_rt]);                            break; // addu
         case 0x22: // sub
@@ -122,6 +144,18 @@ void MipsCPU::execute()
         case 0x2A: wr(m_rd, signed32(r[m_rs]) < signed32(r[m_rt]) ? 1u:0u); break; // slt
         case 0x2B: wr(m_rd, r[m_rs] < r[m_rt]                      ? 1u:0u); break; // sltu
 
+        default: break;
+        }
+        return;
+    }
+
+    // ── SPECIAL2 (opcode 0x1C) ───────────────────────────────────────────────
+    // MIPS32 additions that don't fit the plain R-type (opcode 0) encoding.
+    if (m_opcode == 0x1C)
+    {
+        switch (m_funct)
+        {
+        case 0x02: wr(m_rd, r[m_rs] * r[m_rt]); break; // mul (low 32 bits only, no hi/lo)
         default: break;
         }
         return;
@@ -250,10 +284,31 @@ void MipsCPU::syscall_handler()
             uint32_t i = 0;
             for (; i < maxLen - 1 && i < static_cast<uint32_t>(input.size()); ++i)
                 m_mem->writeByte(addr + i, static_cast<uint8_t>(input[i]));
-            m_mem->writeByte(addr + i, 0); 
+            m_mem->writeByte(addr + i, 0);
         }
         break;
-    case 10: 
+    case 32: // Sleep: a0 = milliseconds
+        if (m_sleepCallback)
+            m_sleepCallback(r[4]);
+        break;
+    case 30: { // System time (ms since epoch): a0 = low 32 bits, a1 = high 32 bits
+        uint64_t ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        r[4] = static_cast<uint32_t>(ms & 0xFFFFFFFFu);
+        r[5] = static_cast<uint32_t>(ms >> 32);
+    } break;
+    case 40: // Random Seed: a1 = seed
+        m_rng.seed(r[5]);
+        break;
+    case 41: // Random Int: result -> a0
+        r[4] = static_cast<uint32_t>(m_rng());
+        break;
+    case 42: { // Random Int Range: a1 = exclusive upper bound; result -> a0
+        uint32_t bound = r[5];
+        r[4] = (bound == 0) ? 0u : static_cast<uint32_t>(m_rng() % bound);
+    } break;
+    case 10:
         m_halted = true;
         break;
     default: break;
@@ -370,14 +425,14 @@ void MipsCPU::stageID() {
     bool reads_rt = true;
     
     if (m_opcode == 0x02 || m_opcode == 0x03 || m_opcode == 0x0F) reads_rs = false;
-    if (m_opcode != 0x00 && m_opcode != 0x2B && m_opcode != 0x28 && m_opcode != 0x29 && 
+    if (m_opcode != 0x00 && m_opcode != 0x1C && m_opcode != 0x2B && m_opcode != 0x28 && m_opcode != 0x29 &&
         m_opcode != 0x04 && m_opcode != 0x05 && m_opcode != 0x06 && m_opcode != 0x07) {
-        reads_rt = false; 
+        reads_rt = false;
     }
 
     // Identify where this instruction will write data
     uint32_t dest_reg = 0;
-    if (m_opcode == 0x00) dest_reg = m_rd; // R-type
+    if (m_opcode == 0x00 || m_opcode == 0x1C) dest_reg = m_rd; // R-type and SPECIAL2 (mul)
     else if (m_opcode == 0x03) dest_reg = 31; // JAL
     else if (m_opcode != 0x2B && m_opcode != 0x28 && m_opcode != 0x29 && 
              m_opcode != 0x04 && m_opcode != 0x05 && m_opcode != 0x06 && m_opcode != 0x07 && m_opcode != 0x02) {
