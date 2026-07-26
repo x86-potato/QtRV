@@ -4,7 +4,6 @@ QtRV is a desktop IDE for writing, assembling, and executing MIPS assembly progr
 
 ## Screenshots
 
-> Add screenshots below to showcase the editor, register/memory panels, and the pipeline visualization.
 
 **Main editor & layout**
 
