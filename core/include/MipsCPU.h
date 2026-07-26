@@ -4,9 +4,22 @@
 #include <string>
 #include <unordered_set>
 #include <random>
+#include <stdexcept>
 
 #include "Memory.h"
 #include "Buffer.h"
+
+// Thrown by execute()/fetch()/memoryAccess() for conditions real MIPS hardware
+// traps on (signed add/sub/addi overflow) or that indicate a genuine program
+// bug rather than normal termination (jumping to / loading from an unmapped
+// or misaligned address). `pc` is the address of the offending instruction so
+// the GUI can translate it back to a source line via Emulator::m_PCtoLineMap.
+struct MipsRuntimeError : std::runtime_error
+{
+    uint32_t pc;
+    MipsRuntimeError(const std::string& msg, uint32_t faultPc)
+        : std::runtime_error(msg), pc(faultPc) {}
+};
 
 class MipsCPU
 {
@@ -62,6 +75,12 @@ public:
     uint32_t m_instr  = 0;
     std::mt19937 m_rng { std::random_device{}() }; // backs syscalls 40/41/42 (seed/random int)
 
+    // Address of the instruction currently flowing through execute()/memoryAccess(),
+    // used to attribute a MipsRuntimeError to the right source line. Set by
+    // fetch() for the non-pipelined path and by stageEX()/stageMEM() for the
+    // pipelined path (where `pc` itself gets temporarily repurposed).
+    uint32_t m_currentInstrPC = 0;
+
     // ── Decoded instruction fields ───────────────────────────────────────────
     uint32_t m_opcode = 0;
     uint32_t m_rs     = 0;
@@ -104,7 +123,9 @@ public:
         bool valid = false;
         uint32_t opcode = 0;
         uint32_t rt = 0;
-        
+        uint32_t pc = 0; // instruction address, forwarded so stageMEM() can attribute faults
+
+
         // Output from execute()
         uint32_t alu_result = 0;
         uint32_t wb_reg = 0;

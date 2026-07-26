@@ -40,7 +40,9 @@ void MipsCPU::fetch()
     // Halt if PC has run off the end of the loaded text segment
     if (textEnd != 0 && pc >= textEnd) { m_halted = true; return; }
     uint32_t *word = m_mem->readWord(pc);
-    if (!word) { m_halted = true; return; }   // PC outside mapped memory
+    if (!word)   // PC outside mapped memory or misaligned -- a genuine bad jump, not EOF
+        throw MipsRuntimeError("Attempted to execute instruction at unmapped or misaligned address", pc);
+    m_currentInstrPC = pc;
     m_instr = *word;
     pc += 4;
 }
@@ -132,9 +134,19 @@ void MipsCPU::execute()
                 lo = 0; hi = 0;
             }
         } break;
-        case 0x20: // add
+        case 0x20: { // add -- traps on signed overflow, unlike addu
+            int64_t result = static_cast<int64_t>(signed32(r[m_rs])) + static_cast<int64_t>(signed32(r[m_rt]));
+            if (result != static_cast<int64_t>(static_cast<int32_t>(result)))
+                throw MipsRuntimeError("Arithmetic overflow in 'add'", m_currentInstrPC);
+            wr(m_rd, static_cast<uint32_t>(result));
+        } break;
         case 0x21: wr(m_rd, r[m_rs] + r[m_rt]);                            break; // addu
-        case 0x22: // sub
+        case 0x22: { // sub -- traps on signed overflow, unlike subu
+            int64_t result = static_cast<int64_t>(signed32(r[m_rs])) - static_cast<int64_t>(signed32(r[m_rt]));
+            if (result != static_cast<int64_t>(static_cast<int32_t>(result)))
+                throw MipsRuntimeError("Arithmetic overflow in 'sub'", m_currentInstrPC);
+            wr(m_rd, static_cast<uint32_t>(result));
+        } break;
         case 0x23: wr(m_rd, r[m_rs] - r[m_rt]);                            break; // subu
         case 0x24: wr(m_rd, r[m_rs] & r[m_rt]);                            break; // and
         case 0x25: wr(m_rd, r[m_rs] | r[m_rt]);                            break; // or
@@ -165,7 +177,12 @@ void MipsCPU::execute()
     switch (m_opcode)
     {
     // Arithmetic
-    case 0x08: // addi
+    case 0x08: { // addi -- traps on signed overflow, unlike addiu
+        int64_t result = static_cast<int64_t>(signed32(r[m_rs])) + static_cast<int64_t>(m_imm);
+        if (result != static_cast<int64_t>(static_cast<int32_t>(result)))
+            throw MipsRuntimeError("Arithmetic overflow in 'addi'", m_currentInstrPC);
+        wr(m_rt, static_cast<uint32_t>(result));
+    } break;
     case 0x09: wr(m_rt, static_cast<uint32_t>(signed32(r[m_rs]) + m_imm)); break; // addiu
 
     // Comparisons
@@ -220,14 +237,19 @@ void MipsCPU::memoryAccess()
 
     switch (m_opcode)
     {
-    // Loads
-    case 0x23: if (auto *p = m_mem->readWord    (m_alu_result)) load(*p);                                            break; // lw
-    case 0x20: if (auto *p = m_mem->readByte    (m_alu_result)) load(static_cast<uint32_t>(signed32(*p << 24) >> 24)); break; // lb  (sign)
-    case 0x24: if (auto *p = m_mem->readByte    (m_alu_result)) load(*p);                                            break; // lbu
-    case 0x21: if (auto *p = m_mem->readHalfword(m_alu_result)) load(static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(*p)))); break; // lh  (sign)
-    case 0x25: if (auto *p = m_mem->readHalfword(m_alu_result)) load(*p);                                            break; // lhu
+    // Loads -- readWord/readHalfword/readByte return null on an unmapped page
+    // (or a misaligned address, for word/halfword) rather than allocating one,
+    // since a load shouldn't silently conjure memory into existence. That null
+    // almost always means a genuine bad pointer, so surface it instead of
+    // leaving the destination register with a stale, silently-wrong value.
+    case 0x23: if (auto *p = m_mem->readWord    (m_alu_result)) load(*p); else throw MipsRuntimeError("Load word (lw) from unmapped or misaligned address", m_currentInstrPC);  break; // lw
+    case 0x20: if (auto *p = m_mem->readByte    (m_alu_result)) load(static_cast<uint32_t>(signed32(*p << 24) >> 24)); else throw MipsRuntimeError("Load byte (lb) from unmapped address", m_currentInstrPC); break; // lb  (sign)
+    case 0x24: if (auto *p = m_mem->readByte    (m_alu_result)) load(*p); else throw MipsRuntimeError("Load byte unsigned (lbu) from unmapped address", m_currentInstrPC); break; // lbu
+    case 0x21: if (auto *p = m_mem->readHalfword(m_alu_result)) load(static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(*p)))); else throw MipsRuntimeError("Load halfword (lh) from unmapped or misaligned address", m_currentInstrPC); break; // lh  (sign)
+    case 0x25: if (auto *p = m_mem->readHalfword(m_alu_result)) load(*p); else throw MipsRuntimeError("Load halfword unsigned (lhu) from unmapped or misaligned address", m_currentInstrPC); break; // lhu
 
-    // Stores
+    // Stores -- writeWord/writeHalfword/writeByte auto-allocate their page, so
+    // there's no unmapped-address failure mode to trap here.
     case 0x2B: m_mem->writeWord    (m_alu_result, r[m_rt]);                         break; // sw
     case 0x28: m_mem->writeByte    (m_alu_result, static_cast<uint8_t> (r[m_rt]));  break; // sb
     case 0x29: m_mem->writeHalfword(m_alu_result, static_cast<uint16_t>(r[m_rt]));  break; // sh
@@ -359,6 +381,7 @@ void MipsCPU::stageMEM() {
     m_alu_result   = EX_MEM.alu_result;
     m_wb_reg       = EX_MEM.wb_reg;
     m_do_writeback = EX_MEM.do_writeback;
+    m_currentInstrPC = EX_MEM.pc;
 
     memoryAccess();
 
@@ -384,14 +407,15 @@ void MipsCPU::stageEX() {
     m_imm     = ID_EX.imm;
     m_address = ID_EX.address;
     
-    uint32_t fetch_pc = pc; 
-    pc = ID_EX.pc; 
-    
+    uint32_t fetch_pc = pc;
+    pc = ID_EX.pc;
+    m_currentInstrPC = ID_EX.pc;
+
     m_alu_result = 0;
     m_wb_reg = 0;
     m_do_writeback = false;
 
-    execute(); 
+    execute();
 
     if (pc != ID_EX.pc) {
         IF_ID.valid = false;
@@ -405,9 +429,10 @@ void MipsCPU::stageEX() {
     EX_MEM.alu_result   = m_alu_result;
     EX_MEM.wb_reg       = m_wb_reg;
     EX_MEM.do_writeback = m_do_writeback;
-    
+    EX_MEM.pc           = ID_EX.pc;
+
     // Pass the hazard tracker forward
-    EX_MEM.dest_reg     = ID_EX.dest_reg; 
+    EX_MEM.dest_reg     = ID_EX.dest_reg;
 }
 
 void MipsCPU::stageID() {

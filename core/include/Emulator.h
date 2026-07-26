@@ -198,6 +198,19 @@ public:
         return result;
     }
 
+    // Translates a MipsRuntimeError's faulting PC to a blob-relative "at line
+    // N" suffix (via m_PCtoLineMap) so it flows through the same
+    // annotateFileLines() rewriting that assembler/parser errors already use,
+    // giving runtime traps (overflow, bad address) file+line just like them.
+    std::string annotateRuntimeError(const MipsRuntimeError& e) const
+    {
+        std::string msg = e.what();
+        auto it = m_PCtoLineMap.find(e.pc);
+        if (it != m_PCtoLineMap.end())
+            msg += " at line " + std::to_string(it->second);
+        return msg;
+    }
+
     template <typename Callback>
     void run(Callback callback, uint32_t maxCycles = UINT32_MAX)
     {
@@ -213,10 +226,15 @@ public:
 
         uint32_t cycles = 0;
         while (!m_cpu.halted()) {
-            if(m_pipelineMode) {
-                m_cpu.cycleTick();
-            } else {
-                m_cpu.tick();
+            try {
+                if(m_pipelineMode) {
+                    m_cpu.cycleTick();
+                } else {
+                    m_cpu.tick();
+                }
+            } catch (const MipsRuntimeError& e) {
+                m_cpu.m_halted = true;
+                throw std::runtime_error(annotateRuntimeError(e));
             }
 
             //construct the future instruction state for the pipeline panel
@@ -342,10 +360,15 @@ public:
             m_cpu.m_ignoreNextBreakpoint = true;
         } 
         
-        if(m_pipelineMode) {
-            m_cpu.cycleTick();
-        } else {
-            m_cpu.tick();
+        try {
+            if(m_pipelineMode) {
+                m_cpu.cycleTick();
+            } else {
+                m_cpu.tick();
+            }
+        } catch (const MipsRuntimeError& e) {
+            m_cpu.m_halted = true;
+            throw std::runtime_error(annotateRuntimeError(e));
         }
 
         updatePipelineStates();

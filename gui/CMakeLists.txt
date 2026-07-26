@@ -1,4 +1,4 @@
-add_executable(QTRv
+add_executable(QtMips
     src/main.cpp
     src/MainWindow.cpp
     src/Console.cpp
@@ -17,13 +17,13 @@ add_executable(QTRv
     src/DisplayWindow.cpp
 )
 
-set_target_properties(QTRv PROPERTIES
+set_target_properties(QtMips PROPERTIES
     AUTOMOC ON
     AUTOUIC ON
     AUTORCC ON
 )
 
-target_link_libraries(QTRv
+target_link_libraries(QtMips
     PRIVATE core
     PRIVATE Qt5::Widgets
 )

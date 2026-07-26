@@ -40,7 +40,7 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("QtRV");
+    setWindowTitle("QtMips");
     resize(1200, 800);
 
     m_emulator = std::make_unique<Emulator>();
@@ -757,8 +757,10 @@ void MainWindow::onRunClicked()
             m_runTimer->start(1000 / m_cpuSpeed);
         }
     } catch (const std::exception &e) {
-        m_emulator->m_buffer.m_data += "\n[Error] " + m_emulator->annotateFileLines(e.what());
+        std::string msg = m_emulator->annotateFileLines(e.what());
+        m_emulator->m_buffer.m_data += "\n[Error] " + msg;
         updatePanels();
+        QMessageBox::warning(this, "Runtime Exception", QString::fromStdString(msg));
     }
 }
 
@@ -777,7 +779,11 @@ void MainWindow::onStepClicked()
             m_emulator->step();
         }
     } catch (const std::exception &e) {
-        m_emulator->m_buffer.m_data += "\n[Error] " + m_emulator->annotateFileLines(e.what());
+        std::string msg = m_emulator->annotateFileLines(e.what());
+        m_emulator->m_buffer.m_data += "\n[Error] " + msg;
+        updatePanels();
+        QMessageBox::warning(this, "Runtime Exception", QString::fromStdString(msg));
+        return;
     }
     updatePanels();
 }
@@ -796,7 +802,9 @@ void MainWindow::onRunTimerTick()
     } catch (const std::exception &e) {
         m_runTimer->stop();
         m_runAction->setText("Run");
-        m_emulator->m_buffer.m_data += "\n[Error] " + m_emulator->annotateFileLines(e.what());
+        std::string msg = m_emulator->annotateFileLines(e.what());
+        m_emulator->m_buffer.m_data += "\n[Error] " + msg;
         updatePanels();
+        QMessageBox::warning(this, "Runtime Exception", QString::fromStdString(msg));
     }
 }
