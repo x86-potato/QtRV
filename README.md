@@ -1,6 +1,6 @@
-# QtRV — MIPS Assembly IDE & Pipelined CPU Simulator
+# QtMips — MIPS Assembly IDE & Pipelined CPU Simulator
 
-QtRV is a desktop IDE for writing, assembling, and executing MIPS assembly programs, built with C++17 and Qt5. It includes a from-scratch lexer, parser, assembler, and CPU core, and supports both a single-cycle execution mode and a 5-stage pipelined execution mode with hazard detection, stalls, and flushes — visualized live as the program runs.
+QtMips is a desktop IDE for writing, assembling, and executing MIPS assembly programs, built with C++17 and Qt5. It includes a from-scratch lexer, parser, assembler, and CPU core, and supports both a single-cycle execution mode and a 5-stage pipelined execution mode with hazard detection, stalls, and flushes — visualized live as the program runs.
 
 ## Screenshots
 
@@ -75,11 +75,11 @@ cmake --preset prod
 cmake --build --preset prod-build
 ```
 
-Run the resulting `QTRv` executable from the build output directory.
+Run the resulting `QtMips` executable from the build output directory.
 
 ## Usage
 
-1. Launch QtRV and write or open a `.asm` MIPS assembly file (see `tests/add_print.asm` for an example).
+1. Launch QtMips and write or open a `.asm` MIPS assembly file (see `tests/add_print.asm` for an example).
 2. Press **F5** (Assemble & Run) to assemble and execute, or **F10** to single-step.
 3. Toggle **Mode: Pipeline** on the toolbar to switch from single-cycle to the 5-stage pipelined CPU and watch the pipeline panel populate cycle-by-cycle.
 4. Use the **View** menu to show/hide the Register, Memory, Console, and Pipeline docks.
